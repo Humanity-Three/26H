@@ -1,0 +1,25 @@
+# Keil MDK build outputs
+Listings/
+Objects/
+*.o
+*.d
+*.axf
+*.build_log.htm
+*.htm
+*.lnp
+*.dep
+*.crf
+
+# Debug & build logs
+build.log
+build_incremental.log
+
+# Syscfg
+config/Event.dot
+
+# UVision user files
+*.uvguix.*
+*.uvoptx
+
+# Codex analysis
+.codex-analysis/
