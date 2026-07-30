@@ -110,7 +110,7 @@ extern "C" {
 #define OLED_I2C_INST                                                       I2C0
 #define OLED_I2C_INST_IRQHandler                                 I2C0_IRQHandler
 #define OLED_I2C_INST_INT_IRQN                                     I2C0_INT_IRQn
-#define OLED_I2C_BUS_SPEED_HZ                                             400000
+#define OLED_I2C_BUS_SPEED_HZ                                             500000
 #define GPIO_OLED_I2C_SDA_PORT                                             GPIOA
 #define GPIO_OLED_I2C_SDA_PIN                                      DL_GPIO_PIN_0
 #define GPIO_OLED_I2C_IOMUX_SDA                                   (IOMUX_PINCM1)
@@ -119,6 +119,26 @@ extern "C" {
 #define GPIO_OLED_I2C_SCL_PIN                                      DL_GPIO_PIN_1
 #define GPIO_OLED_I2C_IOMUX_SCL                                   (IOMUX_PINCM2)
 #define GPIO_OLED_I2C_IOMUX_SCL_FUNC                    IOMUX_PINCM2_PF_I2C0_SCL
+
+
+/* Defines for K230_UART */
+#define K230_UART_INST                                                     UART0
+#define K230_UART_INST_FREQUENCY                                        80000000
+#define K230_UART_INST_IRQHandler                               UART0_IRQHandler
+#define K230_UART_INST_INT_IRQN                                   UART0_INT_IRQn
+#define GPIO_K230_UART_RX_PORT                                             GPIOA
+#define GPIO_K230_UART_TX_PORT                                             GPIOA
+#define GPIO_K230_UART_RX_PIN                                     DL_GPIO_PIN_31
+#define GPIO_K230_UART_TX_PIN                                     DL_GPIO_PIN_28
+#define GPIO_K230_UART_IOMUX_RX                                   (IOMUX_PINCM6)
+#define GPIO_K230_UART_IOMUX_TX                                   (IOMUX_PINCM3)
+#define GPIO_K230_UART_IOMUX_RX_FUNC                    IOMUX_PINCM6_PF_UART0_RX
+#define GPIO_K230_UART_IOMUX_TX_FUNC                    IOMUX_PINCM3_PF_UART0_TX
+#define K230_UART_BAUD_RATE                                             (115200)
+#define K230_UART_IBRD_80_MHZ_115200_BAUD                                   (43)
+#define K230_UART_FBRD_80_MHZ_115200_BAUD                                   (26)
+
+
 
 
 
@@ -152,6 +172,12 @@ extern "C" {
 /* Defines for KEY_2: GPIOB.7 with pinCMx 24 on package pin 59 */
 #define KEY_KEY_2_PIN                                            (DL_GPIO_PIN_7)
 #define KEY_KEY_2_IOMUX                                          (IOMUX_PINCM24)
+/* Defines for KEY_3: GPIOB.8 with pinCMx 25 on package pin 60 */
+#define KEY_KEY_3_PIN                                            (DL_GPIO_PIN_8)
+#define KEY_KEY_3_IOMUX                                          (IOMUX_PINCM25)
+/* Defines for KEY_4: GPIOB.9 with pinCMx 26 on package pin 61 */
+#define KEY_KEY_4_PIN                                            (DL_GPIO_PIN_9)
+#define KEY_KEY_4_IOMUX                                          (IOMUX_PINCM26)
 /* Port definition for Pin Group MOTOR */
 #define MOTOR_PORT                                                       (GPIOB)
 
@@ -201,19 +227,19 @@ extern "C" {
 
 /* Defines for MCAN0 MCAN RAM configuration */
 #define MCAN0_INST_MCAN_STD_ID_FILT_START_ADDR     (0)
-#define MCAN0_INST_MCAN_STD_ID_FILTER_NUM          (1)
-#define MCAN0_INST_MCAN_EXT_ID_FILT_START_ADDR     (48)
+#define MCAN0_INST_MCAN_STD_ID_FILTER_NUM          (0)
+#define MCAN0_INST_MCAN_EXT_ID_FILT_START_ADDR     (0)
 #define MCAN0_INST_MCAN_EXT_ID_FILTER_NUM          (1)
-#define MCAN0_INST_MCAN_TX_BUFF_START_ADDR         (148)
-#define MCAN0_INST_MCAN_TX_BUFF_SIZE               (2)
+#define MCAN0_INST_MCAN_TX_BUFF_START_ADDR         (72)
+#define MCAN0_INST_MCAN_TX_BUFF_SIZE               (1)
 #define MCAN0_INST_MCAN_FIFO_1_START_ADDR          (192)
-#define MCAN0_INST_MCAN_FIFO_1_NUM                 (2)
-#define MCAN0_INST_MCAN_TX_EVENT_START_ADDR        (164)
-#define MCAN0_INST_MCAN_TX_EVENT_SIZE              (2)
+#define MCAN0_INST_MCAN_FIFO_1_NUM                 (0)
+#define MCAN0_INST_MCAN_TX_EVENT_START_ADDR        (88)
+#define MCAN0_INST_MCAN_TX_EVENT_SIZE              (1)
 #define MCAN0_INST_MCAN_EXT_ID_AND_MASK            (0x1FFFFFFFU)
-#define MCAN0_INST_MCAN_RX_BUFF_START_ADDR         (208)
-#define MCAN0_INST_MCAN_FIFO_0_START_ADDR          (172)
-#define MCAN0_INST_MCAN_FIFO_0_NUM                 (3)
+#define MCAN0_INST_MCAN_RX_BUFF_START_ADDR         (92)
+#define MCAN0_INST_MCAN_FIFO_0_START_ADDR          (8)
+#define MCAN0_INST_MCAN_FIFO_0_NUM                 (4)
 
 
 
@@ -229,6 +255,7 @@ void SYSCFG_DL_SYSCTL_CLK_init(void);
 void SYSCFG_DL_MOTOR_PWM_init(void);
 void SYSCFG_DL_TIMER_0_init(void);
 void SYSCFG_DL_OLED_I2C_init(void);
+void SYSCFG_DL_K230_UART_init(void);
 
 void SYSCFG_DL_MCAN0_init(void);
 

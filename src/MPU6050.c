@@ -1,4 +1,5 @@
 #include "MPU6050.h"
+#include "MPU6050_Port.h"
 #include "ti_msp_dl_config.h"
 #include "Delay.h"
 #include <math.h>
@@ -46,40 +47,37 @@ float accel_pitch, accel_roll;
 // SDA = PA0, SCL = PA1
 //=====================================================================
 
-#define IIC_SDA_PORT    GPIOA
-#define IIC_SDA_PIN     DL_GPIO_PIN_0
-#define IIC_SCL_PORT    GPIOA
-#define IIC_SCL_PIN     DL_GPIO_PIN_1
-
 static void SDA_OUT(void)
 {
-    DL_GPIO_initDigitalOutput(IOMUX_PINCM1);
+    DL_GPIO_initDigitalOutput(MPU6050_I2C_SDA_IOMUX);
 }
 
 static void SDA_IN(void)
 {
-    DL_GPIO_initDigitalInput(IOMUX_PINCM1);
+    DL_GPIO_initDigitalInput(MPU6050_I2C_SDA_IOMUX);
 }
 
 static uint8_t SDA_GET(void)
 {
-    return (DL_GPIO_readPins(IIC_SDA_PORT, IIC_SDA_PIN) & IIC_SDA_PIN) ? 1 : 0;
+    return (DL_GPIO_readPins(
+                MPU6050_I2C_SDA_PORT, MPU6050_I2C_SDA_PIN) &
+            MPU6050_I2C_SDA_PIN) ? 1U : 0U;
 }
 
 static void SDA_SET(uint8_t x)
 {
     if (x)
-        DL_GPIO_setPins(IIC_SDA_PORT, IIC_SDA_PIN);
+        DL_GPIO_setPins(MPU6050_I2C_SDA_PORT, MPU6050_I2C_SDA_PIN);
     else
-        DL_GPIO_clearPins(IIC_SDA_PORT, IIC_SDA_PIN);
+        DL_GPIO_clearPins(MPU6050_I2C_SDA_PORT, MPU6050_I2C_SDA_PIN);
 }
 
 static void SCL_SET(uint8_t x)
 {
     if (x)
-        DL_GPIO_setPins(IIC_SCL_PORT, IIC_SCL_PIN);
+        DL_GPIO_setPins(MPU6050_I2C_SCL_PORT, MPU6050_I2C_SCL_PIN);
     else
-        DL_GPIO_clearPins(IIC_SCL_PORT, IIC_SCL_PIN);
+        DL_GPIO_clearPins(MPU6050_I2C_SCL_PORT, MPU6050_I2C_SCL_PIN);
 }
 
 static void IIC_Delay(void)

@@ -34,6 +34,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 
 
@@ -49,6 +50,8 @@
   * 才会将显存数组的数据发送到OLED硬件，进行显示
   */
 uint8_t OLED_DisplayBuf[8][128];
+volatile uint32_t g_oled_i2c_error_count = 0U;
+static uint8_t g_oled_i2c_send_buffer[129];
 
 // 中断保护宏定义（注释掉以避免长时间关中断导致主循环饿死）
 // #define OLED_ENTER_CRITICAL()    __asm(" CPSID I ")
@@ -56,14 +59,36 @@ uint8_t OLED_DisplayBuf[8][128];
 #define OLED_ENTER_CRITICAL()
 #define OLED_EXIT_CRITICAL()
 #define OLED_I2C_ADDR       0x3C
-#define OLED_DATA_CHUNK     7
-#define OLED_I2C_TIMEOUT    100000U
-#define OLED_SCL_PORT       GPIO_OLED_I2C_SCL_PORT
-#define OLED_SCL_PIN        GPIO_OLED_I2C_SCL_PIN
-#define OLED_SCL_IOMUX      GPIO_OLED_I2C_IOMUX_SCL
-#define OLED_SDA_PORT       GPIO_OLED_I2C_SDA_PORT
-#define OLED_SDA_PIN        GPIO_OLED_I2C_SDA_PIN
-#define OLED_SDA_IOMUX      GPIO_OLED_I2C_IOMUX_SDA
+#define OLED_I2C_TIMEOUT    10000U
+#define OLED_I2C_RETRY_COUNT 1U
+
+static bool OLED_I2C_FlushTXFIFO(I2C_Regs *inst)
+{
+    uint32_t timeout = OLED_I2C_TIMEOUT;
+
+    /*
+     * DriverLib 的 DL_I2C_flushControllerTXFIFO() 内部没有超时，
+     * 外设异常时会永久阻塞主循环，因此在这里使用有界版本。
+     */
+    DL_I2C_startFlushControllerTXFIFO(inst);
+    while ((!DL_I2C_isControllerTXFIFOEmpty(inst)) && (timeout > 0U)) {
+        timeout--;
+    }
+    DL_I2C_stopFlushControllerTXFIFO(inst);
+    return (timeout != 0U);
+}
+
+static bool OLED_I2C_TransferFailed(I2C_Regs *inst)
+{
+    /*
+     * 清除异常传输留下的控制器状态和 TX FIFO，避免后续刷新持续失败，
+     * 导致 OLED 永久停留在最后一次成功写入的画面。
+     */
+    g_oled_i2c_error_count++;
+    DL_I2C_resetControllerTransfer(inst);
+    (void)OLED_I2C_FlushTXFIFO(inst);
+    return false;
+}
 
 /*********************全局变量*/
 
@@ -110,22 +135,88 @@ __attribute__((unused)) static void OLED_I2C_TransmitBlocking_Old(I2C_Regs *inst
     while (DL_I2C_getControllerStatus(inst) & DL_I2C_CONTROLLER_STATUS_BUSY);
 }
 
-static void OLED_I2C_TransmitBlocking(I2C_Regs *inst, uint8_t devAddr, uint8_t *data, uint16_t len)
+static bool OLED_I2C_TransmitBlocking(
+	I2C_Regs *inst, uint8_t devAddr, const uint8_t *data, uint16_t len)
 {
     uint32_t timeout;
+    uint32_t status;
+    uint32_t filled;
+    uint16_t sent;
 
+    /* TI官方流程：开始新传输前必须确认控制器处于IDLE。 */
     timeout = OLED_I2C_TIMEOUT;
-    while ((DL_I2C_getControllerStatus(inst) & DL_I2C_CONTROLLER_STATUS_BUSY) && (timeout-- > 0U)) {
+    while (((DL_I2C_getControllerStatus(inst) &
+             DL_I2C_CONTROLLER_STATUS_IDLE) == 0U) &&
+           (timeout > 0U)) {
+        timeout--;
+    }
+    if (timeout == 0U) {
+        return OLED_I2C_TransferFailed(inst);
     }
 
     DL_I2C_resetControllerTransfer(inst);
-    DL_I2C_flushControllerTXFIFO(inst);
-    DL_I2C_fillControllerTXFIFO(inst, data, len);
+    if (!OLED_I2C_FlushTXFIFO(inst)) {
+        return OLED_I2C_TransferFailed(inst);
+    }
+    filled = DL_I2C_fillControllerTXFIFO(
+        inst, (uint8_t *)data, (uint32_t)len);
+    sent = (uint16_t)filled;
+
+    DL_I2C_clearInterruptStatus(
+        inst, DL_I2C_INTERRUPT_CONTROLLER_TXFIFO_EMPTY);
     DL_I2C_startControllerTransfer(inst, devAddr, DL_I2C_CONTROLLER_DIRECTION_TX, len);
 
+    /*
+     * 按 TI 官方轮询流程：等待 TX FIFO 完全发送后再补下一批。
+     * 不能无条件连续探测 FIFO 空位，否则长帧容易在页尾丢字节。
+     */
     timeout = OLED_I2C_TIMEOUT;
-    while ((DL_I2C_getControllerStatus(inst) & DL_I2C_CONTROLLER_STATUS_BUSY) && (timeout-- > 0U)) {
+    while ((sent < len) && (timeout > 0U)) {
+        status = DL_I2C_getControllerStatus(inst);
+        if ((status & DL_I2C_CONTROLLER_STATUS_ERROR) != 0U) {
+            return OLED_I2C_TransferFailed(inst);
+        }
+        if (DL_I2C_getRawInterruptStatus(
+                inst, DL_I2C_INTERRUPT_CONTROLLER_TXFIFO_EMPTY) != 0U) {
+            DL_I2C_clearInterruptStatus(
+                inst, DL_I2C_INTERRUPT_CONTROLLER_TXFIFO_EMPTY);
+            filled = DL_I2C_fillControllerTXFIFO(
+                inst, (uint8_t *)&data[sent], (uint16_t)(len - sent));
+            if (filled != 0U) {
+                sent = (uint16_t)(sent + filled);
+                timeout = OLED_I2C_TIMEOUT;
+            } else {
+                timeout--;
+            }
+        } else {
+            timeout--;
+        }
     }
+    if (sent != len) {
+        return OLED_I2C_TransferFailed(inst);
+    }
+
+    /* 等待STOP发送完成，控制器重新回到IDLE。 */
+    timeout = OLED_I2C_TIMEOUT;
+    while (timeout > 0U) {
+        status = DL_I2C_getControllerStatus(inst);
+        if ((status & DL_I2C_CONTROLLER_STATUS_ERROR) != 0U) {
+            return OLED_I2C_TransferFailed(inst);
+        }
+        if ((status & DL_I2C_CONTROLLER_STATUS_IDLE) != 0U) {
+            break;
+        }
+        timeout--;
+    }
+    if (timeout == 0U) {
+        return OLED_I2C_TransferFailed(inst);
+    }
+
+    status = DL_I2C_getControllerStatus(inst);
+    if ((status & DL_I2C_CONTROLLER_STATUS_ERROR) != 0U) {
+        return OLED_I2C_TransferFailed(inst);
+    }
+    return true;
 }
 
 /**
@@ -144,12 +235,7 @@ void OLED_GPIO_Init(void)
 		for (j = 0; j < 1000; j ++);
 	}
 
-	DL_GPIO_initDigitalOutput(OLED_SCL_IOMUX);
-	DL_GPIO_initDigitalOutput(OLED_SDA_IOMUX);
-	DL_GPIO_setPins(OLED_SCL_PORT, OLED_SCL_PIN);
-	DL_GPIO_setPins(OLED_SDA_PORT, OLED_SDA_PIN);
-	DL_GPIO_enableOutput(OLED_SCL_PORT, OLED_SCL_PIN);
-	DL_GPIO_enableOutput(OLED_SDA_PORT, OLED_SDA_PIN);
+	/* I2C0 on PA1/PA0 is initialized by SYSCFG_DL_init(). */
 }
 
 /*********************引脚配置*/
@@ -163,67 +249,20 @@ void OLED_GPIO_Init(void)
   * 返 回 值：无
   * 说    明：使用硬件I2C0传输，数据格式：[0x00(控制字节), Command]
   */
-static void OLED_W_SCL(uint8_t bitValue)
+static bool OLED_I2C_WriteByte(uint8_t value, uint8_t control)
 {
-	if (bitValue != 0U) {
-		DL_GPIO_setPins(OLED_SCL_PORT, OLED_SCL_PIN);
-	} else {
-		DL_GPIO_clearPins(OLED_SCL_PORT, OLED_SCL_PIN);
-	}
-	delay_cycles(40);
-}
+	uint8_t send_buffer[2];
 
-static void OLED_W_SDA(uint8_t bitValue)
-{
-	if (bitValue != 0U) {
-		DL_GPIO_setPins(OLED_SDA_PORT, OLED_SDA_PIN);
-	} else {
-		DL_GPIO_clearPins(OLED_SDA_PORT, OLED_SDA_PIN);
-	}
-	delay_cycles(40);
-}
-
-static void OLED_I2C_Start(void)
-{
-	OLED_W_SDA(1);
-	OLED_W_SCL(1);
-	OLED_W_SDA(0);
-	OLED_W_SCL(0);
-}
-
-static void OLED_I2C_Stop(void)
-{
-	OLED_W_SDA(0);
-	OLED_W_SCL(1);
-	OLED_W_SDA(1);
-}
-
-static void OLED_I2C_SendByte(uint8_t byte)
-{
-	uint8_t i;
-
-	for (i = 0; i < 8U; i++) {
-		OLED_W_SDA((uint8_t)!!(byte & (0x80U >> i)));
-		OLED_W_SCL(1);
-		OLED_W_SCL(0);
-	}
-
-	OLED_W_SDA(1);
-	OLED_W_SCL(1);
-	OLED_W_SCL(0);
+	send_buffer[0] = control;
+	send_buffer[1] = value;
+	return OLED_I2C_TransmitBlocking(
+		OLED_I2C_INST, OLED_I2C_ADDR,
+		send_buffer, sizeof(send_buffer));
 }
 
 void OLED_WriteCommand(uint8_t Command)
 {
-	uint8_t data[2] = {0x00, Command};	/* 控制字节(命令) + 命令值 */
-	
-	OLED_ENTER_CRITICAL();
-	OLED_I2C_Start();
-	OLED_I2C_SendByte((uint8_t)(OLED_I2C_ADDR << 1));
-	OLED_I2C_SendByte(0x00);
-	OLED_I2C_SendByte(Command);
-	OLED_I2C_Stop();
-	OLED_EXIT_CRITICAL();
+	(void)OLED_I2C_WriteByte(Command, 0x00U);
 }
 
 /**
@@ -233,34 +272,17 @@ void OLED_WriteCommand(uint8_t Command)
   * 返 回 值：无
   * 说    明：使用硬件I2C0传输，数据格式：[0x40(控制字节), Data...]
   */
-__attribute__((unused)) void OLED_WriteData_Old(uint8_t *Data, uint8_t Count)
-{
-	uint8_t i;
-	uint8_t buf[129];	/* 控制字节(数据) + 最多128字节数据 */
-	
-	buf[0] = 0x40;		/* 控制字节，表示写数据 */
-	for (i = 0; i < Count; i++) {
-		buf[i + 1] = Data[i];
-	}
-	
-	OLED_ENTER_CRITICAL();
-	OLED_I2C_TransmitBlocking(OLED_I2C_INST, OLED_I2C_ADDR, buf, Count + 1);
-	OLED_EXIT_CRITICAL();
-}
-
 void OLED_WriteData(uint8_t *Data, uint8_t Count)
 {
-	uint8_t i;
-
-	OLED_ENTER_CRITICAL();
-	OLED_I2C_Start();
-	OLED_I2C_SendByte((uint8_t)(OLED_I2C_ADDR << 1));
-	OLED_I2C_SendByte(0x40);
-	for (i = 0; i < Count; i++) {
-		OLED_I2C_SendByte(Data[i]);
+	if ((Data == NULL) || (Count == 0U)) {
+		return;
 	}
-	OLED_I2C_Stop();
-	OLED_EXIT_CRITICAL();
+
+	g_oled_i2c_send_buffer[0] = 0x40U;
+	memcpy(&g_oled_i2c_send_buffer[1], Data, Count);
+	(void)OLED_I2C_TransmitBlocking(
+		OLED_I2C_INST, OLED_I2C_ADDR,
+		g_oled_i2c_send_buffer, (uint16_t)Count + 1U);
 }
 
 /*********************通信协议*/
@@ -291,7 +313,7 @@ void OLED_Init(void)
 	OLED_WriteCommand(0x00);	//0x00~0x7F
 	
 	OLED_WriteCommand(0x40);	//设置显示开始行，0x40~0x7F
-	
+
 	OLED_WriteCommand(0xA1);	//设置左右方向，0xA1正常，0xA0左右反置
 	
 	OLED_WriteCommand(0xC8);	//设置上下方向，0xC8正常，0xC0上下反置
@@ -351,10 +373,9 @@ void OLED_SetCursor(uint8_t Page, uint8_t X)
 	/*所以需要将X加2，才能正常显示*/
 //	X += 2;
 	
-	/*通过指令设置页地址和列地址*/
-	OLED_WriteCommand(0xB0 | Page);					//设置页位置
-	OLED_WriteCommand(0x10 | ((X & 0xF0) >> 4));	//设置X位置高4位
-	OLED_WriteCommand(0x00 | (X & 0x0F));			//设置X位置低4位
+	OLED_WriteCommand((uint8_t)(0xB0U | Page));
+	OLED_WriteCommand((uint8_t)(0x10U | ((X & 0xF0U) >> 4)));
+	OLED_WriteCommand((uint8_t)(X & 0x0FU));
 }
 
 /*********************硬件配置*/

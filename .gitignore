@@ -11,8 +11,16 @@ Objects/
 *.crf
 
 # Debug & build logs
+*.log
 build.log
 build_incremental.log
+
+# Python cache
+__pycache__/
+
+# VSCode workspace
+.vscode/*.log
+.vscode/*.log.lock
 
 # Syscfg
 config/Event.dot

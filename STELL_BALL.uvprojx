@@ -52,7 +52,7 @@
           <OutputName>STELL_BALL</OutputName>
           <CreateExecutable>1</CreateExecutable>
           <CreateLib>0</CreateLib>
-          <CreateHexFile>0</CreateHexFile>
+          <CreateHexFile>1</CreateHexFile>
           <DebugInformation>1</DebugInformation>
           <BrowseInformation>0</BrowseInformation>
           <ListingPath>.\Listings\</ListingPath>
@@ -258,17 +258,17 @@
                 <Size>0x8000</Size>
               </XRAM>
               <OCR_RVCT1>
-                <Type>0</Type>
+                <Type>1</Type>
                 <StartAddress>0x0</StartAddress>
                 <Size>0x0</Size>
               </OCR_RVCT1>
               <OCR_RVCT2>
-                <Type>0</Type>
+                <Type>1</Type>
                 <StartAddress>0x0</StartAddress>
                 <Size>0x0</Size>
               </OCR_RVCT2>
               <OCR_RVCT3>
-                <Type>0</Type>
+                <Type>1</Type>
                 <StartAddress>0x0</StartAddress>
                 <Size>0x0</Size>
               </OCR_RVCT3>
@@ -283,12 +283,12 @@
                 <Size>0x20000</Size>
               </OCR_RVCT5>
               <OCR_RVCT6>
-                <Type>1</Type>
+                <Type>0</Type>
                 <StartAddress>0x20200000</StartAddress>
                 <Size>0x8000</Size>
               </OCR_RVCT6>
               <OCR_RVCT7>
-                <Type>1</Type>
+                <Type>0</Type>
                 <StartAddress>0x20300000</StartAddress>
                 <Size>0x8000</Size>
               </OCR_RVCT7>
@@ -338,7 +338,7 @@
               <MiscControls></MiscControls>
               <Define>__MSPM0G3505__</Define>
               <Undefine></Undefine>
-              <IncludePath>.\src;.\config;D:\ti\mspm0\mspm0_sdk_2_06_00_05\source;D:\ti\mspm0\mspm0_sdk_2_06_00_05\source\third_party\CMSIS\Core\Include</IncludePath>
+              <IncludePath>.\;.\src;.\config;D:\ti\mspm0\mspm0_sdk_2_06_00_05\source;D:\ti\mspm0\mspm0_sdk_2_06_00_05\source\third_party\CMSIS\Core\Include</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -408,14 +408,69 @@
               <FilePath>.\src\OLED_DATA.c</FilePath>
             </File>
             <File>
-              <FileName>MPU6050.c</FileName>
+              <FileName>control.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\src\MPU6050.c</FilePath>
+              <FilePath>.\src\control.c</FilePath>
             </File>
             <File>
-              <FileName>MPU6050.h</FileName>
+              <FileName>control.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\src\MPU6050.h</FilePath>
+              <FilePath>.\src\control.h</FilePath>
+            </File>
+            <File>
+              <FileName>encoder_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\src\encoder_motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>encoder_motor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\src\encoder_motor.h</FilePath>
+            </File>
+            <File>
+              <FileName>Step_Control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Step_Control.c</FilePath>
+            </File>
+            <File>
+              <FileName>Step_Control.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Step_Control.h</FilePath>
+            </File>
+            <File>
+              <FileName>K230_link.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\K230_link.c</FilePath>
+            </File>
+            <File>
+              <FileName>K230_link.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\K230_link.h</FilePath>
+            </File>
+            <File>
+              <FileName>zdt_can_port.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\src\zdt_can_port.c</FilePath>
+            </File>
+            <File>
+              <FileName>zdt_can_port.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\src\zdt_can_port.h</FilePath>
+            </File>
+            <File>
+              <FileName>X_V2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\src\X_V2.c</FilePath>
+            </File>
+            <File>
+              <FileName>X_V2.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\src\X_V2.h</FilePath>
+            </File>
+            <File>
+              <FileName>can.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\src\can.h</FilePath>
             </File>
           </Files>
         </Group>

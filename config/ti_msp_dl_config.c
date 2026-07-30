@@ -56,11 +56,13 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     SYSCFG_DL_MOTOR_PWM_init();
     SYSCFG_DL_TIMER_0_init();
     SYSCFG_DL_OLED_I2C_init();
+    SYSCFG_DL_K230_UART_init();
     SYSCFG_DL_MCAN0_init();
     SYSCFG_DL_SYSCTL_CLK_init();
     /* Ensure backup structures have no valid state */
 
 	gTIMER_0Backup.backupRdy 	= false;
+
 	gMCAN0Backup.backupRdy 	= false;
 
 }
@@ -96,6 +98,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerG_reset(MOTOR_PWM_INST);
     DL_TimerG_reset(TIMER_0_INST);
     DL_I2C_reset(OLED_I2C_INST);
+    DL_UART_Main_reset(K230_UART_INST);
     DL_MCAN_reset(MCAN0_INST);
 
     DL_GPIO_enablePower(GPIOA);
@@ -103,6 +106,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerG_enablePower(MOTOR_PWM_INST);
     DL_TimerG_enablePower(TIMER_0_INST);
     DL_I2C_enablePower(OLED_I2C_INST);
+    DL_UART_Main_enablePower(K230_UART_INST);
     DL_MCAN_enablePower(MCAN0_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
@@ -126,6 +130,11 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
     DL_GPIO_enableHiZ(GPIO_OLED_I2C_IOMUX_SDA);
     DL_GPIO_enableHiZ(GPIO_OLED_I2C_IOMUX_SCL);
 
+    DL_GPIO_initPeripheralOutputFunction(
+        GPIO_K230_UART_IOMUX_TX, GPIO_K230_UART_IOMUX_TX_FUNC);
+    DL_GPIO_initPeripheralInputFunction(
+        GPIO_K230_UART_IOMUX_RX, GPIO_K230_UART_IOMUX_RX_FUNC);
+
     DL_GPIO_initDigitalOutput(BEEP_IO_BEEP_IOMUX);
 
     DL_GPIO_initDigitalOutput(GRAY_SENSOR_GRAY_SENSOR_AD1_IOMUX);
@@ -143,6 +152,14 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 
     DL_GPIO_initDigitalInputFeatures(KEY_KEY_2_IOMUX,
+		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+
+    DL_GPIO_initDigitalInputFeatures(KEY_KEY_3_IOMUX,
+		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
+		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
+
+    DL_GPIO_initDigitalInputFeatures(KEY_KEY_4_IOMUX,
 		 DL_GPIO_INVERSION_DISABLE, DL_GPIO_RESISTOR_PULL_UP,
 		 DL_GPIO_HYSTERESIS_DISABLE, DL_GPIO_WAKEUP_DISABLE);
 
@@ -191,7 +208,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
 		MOTOR_BIN_1_PIN |
 		MOTOR_BIN_2_PIN);
     DL_GPIO_setLowerPinsInputFilter(GPIOB, DL_GPIO_PIN_6_INPUT_FILTER_1_CYCLE |
-		DL_GPIO_PIN_7_INPUT_FILTER_1_CYCLE);
+		DL_GPIO_PIN_7_INPUT_FILTER_1_CYCLE |
+		DL_GPIO_PIN_8_INPUT_FILTER_1_CYCLE);
 
     DL_GPIO_initPeripheralOutputFunction(
         GPIO_MCAN0_IOMUX_CAN_TX, GPIO_MCAN0_IOMUX_CAN_TX_FUNC);
@@ -341,7 +359,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_TIMER_0_init(void) {
 
 static const DL_I2C_ClockConfig gOLED_I2CClockConfig = {
     .clockSel = DL_I2C_CLOCK_BUSCLK,
-    .divideRatio = DL_I2C_CLOCK_DIVIDE_1,
+    .divideRatio = DL_I2C_CLOCK_DIVIDE_4,
 };
 
 SYSCONFIG_WEAK void SYSCFG_DL_OLED_I2C_init(void) {
@@ -356,8 +374,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_OLED_I2C_init(void) {
 
     /* Configure Controller Mode */
     DL_I2C_resetControllerTransfer(OLED_I2C_INST);
-    /* Set frequency to 400000 Hz*/
-    DL_I2C_setTimerPeriod(OLED_I2C_INST, 19);
+    /* Set frequency to 500000 Hz*/
+    DL_I2C_setTimerPeriod(OLED_I2C_INST, 3);
     DL_I2C_setControllerTXFIFOThreshold(OLED_I2C_INST, DL_I2C_TX_FIFO_LEVEL_BYTES_7);
     DL_I2C_setControllerRXFIFOThreshold(OLED_I2C_INST, DL_I2C_RX_FIFO_LEVEL_BYTES_8);
     DL_I2C_enableControllerClockStretching(OLED_I2C_INST);
@@ -367,6 +385,46 @@ SYSCONFIG_WEAK void SYSCFG_DL_OLED_I2C_init(void) {
     DL_I2C_enableController(OLED_I2C_INST);
 
 
+}
+
+static const DL_UART_Main_ClockConfig gK230_UARTClockConfig = {
+    .clockSel    = DL_UART_MAIN_CLOCK_BUSCLK,
+    .divideRatio = DL_UART_MAIN_CLOCK_DIVIDE_RATIO_1
+};
+
+static const DL_UART_Main_Config gK230_UARTConfig = {
+    .mode        = DL_UART_MAIN_MODE_NORMAL,
+    .direction   = DL_UART_MAIN_DIRECTION_TX_RX,
+    .flowControl = DL_UART_MAIN_FLOW_CONTROL_NONE,
+    .parity      = DL_UART_MAIN_PARITY_NONE,
+    .wordLength  = DL_UART_MAIN_WORD_LENGTH_8_BITS,
+    .stopBits    = DL_UART_MAIN_STOP_BITS_ONE
+};
+
+SYSCONFIG_WEAK void SYSCFG_DL_K230_UART_init(void)
+{
+    DL_UART_Main_setClockConfig(K230_UART_INST, (DL_UART_Main_ClockConfig *) &gK230_UARTClockConfig);
+
+    DL_UART_Main_init(K230_UART_INST, (DL_UART_Main_Config *) &gK230_UARTConfig);
+    /*
+     * Configure baud rate by setting oversampling and baud rate divisors.
+     *  Target baud rate: 115200
+     *  Actual baud rate: 115190.78
+     */
+    DL_UART_Main_setOversampling(K230_UART_INST, DL_UART_OVERSAMPLING_RATE_16X);
+    DL_UART_Main_setBaudRateDivisor(K230_UART_INST, K230_UART_IBRD_80_MHZ_115200_BAUD, K230_UART_FBRD_80_MHZ_115200_BAUD);
+
+
+    /* Configure Interrupts */
+    DL_UART_Main_enableInterrupt(K230_UART_INST,
+                                 DL_UART_MAIN_INTERRUPT_RX);
+
+    /* Configure FIFOs */
+    DL_UART_Main_enableFIFOs(K230_UART_INST);
+    DL_UART_Main_setRXFIFOThreshold(K230_UART_INST, DL_UART_RX_FIFO_LEVEL_ONE_ENTRY);
+    DL_UART_Main_setTXFIFOThreshold(K230_UART_INST, DL_UART_TX_FIFO_LEVEL_1_2_EMPTY);
+
+    DL_UART_Main_enable(K230_UART_INST);
 }
 
 static const DL_MCAN_ClockConfig gMCAN0ClockConf = {
@@ -394,6 +452,20 @@ static const DL_MCAN_InitParams gMCAN0InitParams= {
     .tdcConfig.tdco    = 6,
 };
 
+static const DL_MCAN_ConfigParams gMCAN0ConfigParams={
+    /* Initialize MCAN Config parameters. */
+    .monEnable         = false,
+    .asmEnable         = false,
+    .tsPrescalar       = 15,
+    .tsSelect          = 0,
+    .timeoutSelect     = DL_MCAN_TIMEOUT_SELECT_CONT,
+    .timeoutPreload    = 65535,
+    .timeoutCntEnable  = false,
+    .filterConfig.rrfs = false,
+    .filterConfig.rrfe = false,
+    .filterConfig.anfe = 0,
+    .filterConfig.anfs = 0,
+};
 
 static const DL_MCAN_MsgRAMConfigParams gMCAN0MsgRAMConfigParams ={
 
@@ -412,7 +484,7 @@ static const DL_MCAN_MsgRAMConfigParams gMCAN0MsgRAMConfigParams ={
     .txFIFOSize           = 0,
     /* Tx Buffer Element Size. */
     .txBufMode            = 0,
-    .txBufElemSize        = DL_MCAN_ELEM_SIZE_64BYTES,
+    .txBufElemSize        = DL_MCAN_ELEM_SIZE_8BYTES,
     /* Tx Event FIFO Start Address. */
     .txEventFIFOStartAddr = MCAN0_INST_MCAN_TX_EVENT_START_ADDR,
     /* Event FIFO Size. */
@@ -439,7 +511,7 @@ static const DL_MCAN_MsgRAMConfigParams gMCAN0MsgRAMConfigParams ={
     /* Rx Buffer Element Size. */
     .rxBufElemSize        = DL_MCAN_ELEM_SIZE_64BYTES,
     /* Rx FIFO0 Element Size. */
-    .rxFIFO0ElemSize      = DL_MCAN_ELEM_SIZE_64BYTES,
+    .rxFIFO0ElemSize      = DL_MCAN_ELEM_SIZE_8BYTES,
     /* Rx FIFO1 Element Size. */
     .rxFIFO1ElemSize      = DL_MCAN_ELEM_SIZE_64BYTES,
 };
@@ -489,6 +561,8 @@ SYSCONFIG_WEAK void SYSCFG_DL_MCAN0_init(void) {
     /* Initialize MCAN module. */
     DL_MCAN_init(MCAN0_INST, (DL_MCAN_InitParams *) &gMCAN0InitParams);
 
+    /* Configure MCAN module. */
+    DL_MCAN_config(MCAN0_INST, (DL_MCAN_ConfigParams*) &gMCAN0ConfigParams);
 
     /* Configure Bit timings. */
     DL_MCAN_setBitTime(MCAN0_INST, (DL_MCAN_BitTimingParams*) &gMCAN0BitTimes);

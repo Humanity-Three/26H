@@ -30,6 +30,8 @@ typedef struct FPSCounter{
 
 /*初始化函数*/
 void OLED_Init(void);
+void OLED_WriteCommand(uint8_t Command);
+extern volatile uint32_t g_oled_i2c_error_count;
 
 /*亮度控制函数*/
 void OLED_Brightness(int16_t Brightness);

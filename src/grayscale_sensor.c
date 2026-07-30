@@ -24,6 +24,11 @@ uint16_t Grayscale_Sensor_Read_Single(uint8_t channel)
     SENSOR_AD1_WRITE((channel >> 1) & 0x01U);
     SENSOR_AD2_WRITE((channel >> 2) & 0x01U);
 
+    /*
+     * Keep the same mux settling time as the proven 25E implementation.
+     * The sensor board and its output conditioning need this interval after
+     * changing AD0..AD2 before DATA is sampled.
+     */
     Delay_ms(1);
 
     return Grayscale_Normalize(SENSOR_OUT_READ_RAW());
