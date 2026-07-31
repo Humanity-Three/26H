@@ -6,29 +6,30 @@
 
 #define STEP_MOTOR_ADDRESS          (1U)
 #define STEP_MOTOR_POSITION_RPM     (60.0f)
-#define STEP_MOTOR_POSITION_SLEW    (15L)
+#define STEP_MOTOR_POSITION_SLEW    (16L)
 #define STEP_MOTOR_POSITION_TICKS   (1U)
 #define STEP_CONTROL_DEAD_ZONE      (4)
 #define STEP_CONTROL_MAX_RPM        (60)
 #define STEP_CONTROL_INTEGRAL_MAX   (2000)
 #define STEP_CONTROL_INTEGRAL_ZONE  (96)
+#define STEP_CONTROL_INTEGRAL_LEAK_DIVISOR (64L)
 #define STEP_CONTROL_LOST_HOLD_TICKS (8U)
 #define STEP_CONTROL_POSITION_EPSILON (2)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
-#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (24)
+#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (0)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
 
 /*
- * Aggressive, strongly damped balance baseline for the ~23 FPS camera:
- * Kp=0.16, Ki=0.003, Kd=1.50.
- * The higher proportional gain provides a firmer restoring force, while the
- * derivative term adds both initial response and braking near the target. The
- * integral remains relatively weak and only removes static position bias.
+ * Transient-stability tuning baseline for the ~23 FPS camera:
+ * Kp=0.13, Ki=0.002, Kd=2.20.
+ * Keeping the derivative below its frequent saturation region avoids
+ * bang-bang reversals. A weak integral removes residual static position bias
+ * without materially changing the transient response.
  */
-#define STEP_PID_KP_NUM             (160)
-#define STEP_PID_KI_NUM             (3)
-#define STEP_PID_KD_NUM             (1500)
+#define STEP_PID_KP_NUM             (130)
+#define STEP_PID_KI_NUM             (2)
+#define STEP_PID_KD_NUM             (2200)
 #define STEP_PID_GAIN_DEN           (1000)
 
 static StepControl_Status g_step_status;
@@ -131,6 +132,8 @@ static int16_t StepControl_Clamp(int32_t value, int16_t limit)
 void StepControl_Init(void)
 {
     g_active = false;
+    g_step_status.raw_dx = 0;
+    g_step_status.target_offset = 0;
     g_step_status.error = 0;
     g_step_status.output_rpm = 0;
     g_step_status.integral = 0;
@@ -168,6 +171,7 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     }
 
     g_target_offset_pixels = offset_pixels;
+    g_step_status.target_offset = offset_pixels;
     g_step_status.error = 0;
     g_step_status.integral = 0;
     g_previous_error = 0;
@@ -279,6 +283,7 @@ void StepControl_Update10ms(void)
     int32_t unsaturated_output;
     int32_t output;
     bool control_updated = false;
+    bool first_filtered_sample = false;
 
     if (!g_active)
     {
@@ -295,6 +300,8 @@ void StepControl_Update10ms(void)
     if (K230_Link_IsValid(500U) && link->detected)
     {
         g_step_status.link_valid = true;
+        g_step_status.raw_dx = link->dx;
+        g_step_status.target_offset = g_target_offset_pixels;
         g_lost_target_ticks = 0U;
         g_loss_stop_sent = false;
 
@@ -308,6 +315,7 @@ void StepControl_Update10ms(void)
             {
                 g_filtered_error = raw_error;
                 g_filter_valid = true;
+                first_filtered_sample = true;
             }
             else
             {
@@ -345,7 +353,13 @@ void StepControl_Update10ms(void)
              * alternating one-frame coordinate noise cannot reverse the
              * motor command abruptly.
              */
-            derivative = (int16_t)(error - g_previous_error);
+            /*
+             * Do not interpret the initial position error as ball velocity.
+             * Otherwise entering closed loop produces a large derivative kick,
+             * especially with the higher damping gain.
+             */
+            derivative = first_filtered_sample ? 0 :
+                (int16_t)(error - g_previous_error);
             /*
              * Retain only 25% derivative history. Earlier braking is more
              * important than heavy smoothing for the underdamped ball motion.
@@ -357,9 +371,26 @@ void StepControl_Update10ms(void)
             if (error == 0)
             {
                 /*
-                 * Keep the learned level correction in the dead zone. Leaking
-                 * it here makes the ball drift back to the same biased point.
+                 * Slowly release the learned tilt while the ball is inside
+                 * the dead zone. This lets the rail approach mechanical level
+                 * instead of permanently holding a friction-supported ball at
+                 * an old integral tilt. Any renewed drift rebuilds the needed
+                 * correction after the error leaves the dead zone.
                  */
+                if (g_step_status.integral > 0)
+                {
+                    g_step_status.integral -=
+                        (g_step_status.integral +
+                         STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
+                        STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
+                }
+                else if (g_step_status.integral < 0)
+                {
+                    g_step_status.integral +=
+                        (-g_step_status.integral +
+                         STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
+                        STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
+                }
             }
             else if ((error <= STEP_CONTROL_INTEGRAL_ZONE) &&
                      (error >= -STEP_CONTROL_INTEGRAL_ZONE))

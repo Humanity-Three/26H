@@ -799,6 +799,24 @@ static const char *Display_StateName(enum CAR_STATE state)
 
 static void Display_EncoderStatus(void)
 {
+    if (State_UsesStepControl(g_current_state))
+    {
+        StepControl_Status status = StepControl_GetStatus();
+
+        OLED_ClearArea(0U, 16U, 128U, 8U);
+        OLED_ShowString(0U, 16U, "DX:", OLED_6X8);
+        OLED_ShowSignedNum(18U, 16U, status.raw_dx, 4U, OLED_6X8);
+        OLED_ShowString(60U, 16U, "T:", OLED_6X8);
+        OLED_ShowSignedNum(72U, 16U, status.target_offset, 4U, OLED_6X8);
+        OLED_UpdateArea(0U, 16U, 128U, 8U);
+
+        OLED_ClearArea(0U, 24U, 128U, 8U);
+        OLED_ShowString(0U, 24U, "OUT:", OLED_6X8);
+        OLED_ShowSignedNum(24U, 24U, status.output_rpm, 3U, OLED_6X8);
+        OLED_UpdateArea(0U, 24U, 128U, 8U);
+        return;
+    }
+
     Encoder_Status encoder = Encoder_GetStatus();
 
     OLED_ClearArea(0U, 16U, 128U, 8U);
@@ -867,7 +885,9 @@ static void Display_Update10ms(void)
             OLED_ShowNum(
                 18U, 8U, status.link_valid ? 1U : 0U, 1U, OLED_6X8);
             OLED_ShowString(36U, 8U, "E:", OLED_6X8);
-            OLED_ShowSignedNum(48U, 8U, status.error, 4U, OLED_6X8);
+            OLED_ShowSignedNum(48U, 8U, status.error, 3U, OLED_6X8);
+            OLED_ShowString(72U, 8U, "I:", OLED_6X8);
+            OLED_ShowSignedNum(84U, 8U, status.integral, 5U, OLED_6X8);
         }
         OLED_UpdateArea(0U, 8U, 120U, 8U);
         Display_EncoderStatus();
@@ -891,7 +911,9 @@ static void Display_Update10ms(void)
             OLED_ShowNum(
                 18U, 8U, status.link_valid ? 1U : 0U, 1U, OLED_6X8);
             OLED_ShowString(36U, 8U, "E:", OLED_6X8);
-            OLED_ShowSignedNum(48U, 8U, status.error, 4U, OLED_6X8);
+            OLED_ShowSignedNum(48U, 8U, status.error, 3U, OLED_6X8);
+            OLED_ShowString(72U, 8U, "I:", OLED_6X8);
+            OLED_ShowSignedNum(84U, 8U, status.integral, 5U, OLED_6X8);
             OLED_UpdateArea(0U, 8U, 120U, 8U);
         }
         last_heartbeat = g_oled_heartbeat;

@@ -8,6 +8,8 @@
 
 typedef struct
 {
+    int16_t raw_dx;
+    int16_t target_offset;
     int16_t error;
     int16_t output_rpm;
     int32_t integral;
