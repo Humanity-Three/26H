@@ -31,6 +31,8 @@ typedef struct
 
 void LineFollow_Init(void);
 void LineFollow_Reset(void);
+void LineFollow_ResetSoft(void);
+void LineFollow_SetTargetBasePWM(int16_t base_pwm);
 void LineFollow_SetConfig(const LineFollow_Config *config);
 void LineFollow_Update10ms(void);
 LineFollow_Status LineFollow_GetStatus(void);

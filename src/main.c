@@ -25,12 +25,36 @@ __asm(".global __ARM_use_no_argv\n");
 
 #define OLED_HEARTBEAT_TICKS        (50U)
 #define CAL_MOTOR_ADDRESS           (1U)
-#define CAL_QUERY_TICKS             (10U)
+#define CAL_QUERY_TICKS             (2U)
 #define POSITION_REFRESH_TICKS      (2U)
 #define CAL_POSITION_SPAN           (1222L)
-#define ABCDA_TEST_OFFSET_TENTH_DEG (300L)
-#define ABCDA_TEST_ACCEL_RPM_S      (4000U)
-#define ABCDA_TEST_SPEED_RPM        (60.0f)
+#define BALANCE_NEGATIVE_TARGET_PIXELS (-145)
+#define BALANCE_POSITIVE_TARGET_PIXELS (140)
+#define BALANCE_ONE_CM_PIXELS       (32)
+#define BALANCE_SWITCH_LEAD_PIXELS  (120)
+#define BALANCE_ARRIVAL_FRAMES      (3U)
+/*
+ * BALANCE open-loop transfer plus closed-loop endpoint holding.
+ * Position/tilt units are 0.1 motor degree; time units are 10 ms.
+ * Swap the signs of the two tilt offsets if the first travel direction is
+ * opposite to the required -5 cm direction.
+ */
+#define BALANCE_LEVEL_POSITION_TENTHS (938L)
+#define BALANCE_FIRST_TILT_TENTHS     (-80L)
+#define BALANCE_FIRST_TIME_TICKS      (60U)
+#define BALANCE_SECOND_TILT_TENTHS    (100L)
+#define BALANCE_SECOND_TIME_TICKS     (120U)
+#define CIRCLE_RIGHT5_MASK          (0xF8U)
+#define CIRCLE_RIGHT3_MASK          (0xE0U)
+#define CIRCLE_DEPART_TICKS         (10U)
+#define CIRCLE_FINISH_TICKS         (1U)
+#define AB_CRUISE_PWM               (960)
+/* Calibrate this from A to B: average quadrature counts of both wheels. */
+#define AB_TARGET_ENCODER_COUNTS    (10400L)
+#define AB_BRAKE_ENCODER_COUNTS     (2000L)
+#define AB_STOP_RPM                 (3)
+#define AB_STOP_STABLE_TICKS        (10U)
+#define AB_STOP_TIMEOUT_TICKS       (150U)
 
 enum CAR_STATE
 {
@@ -55,6 +79,21 @@ static int32_t g_calibration_cw_position;
 static uint32_t g_calibration_position_sequence;
 static uint8_t g_calibration_query_ticks;
 static bool g_initial_limit_ready;
+static uint8_t g_balance_stage;
+static uint8_t g_balance_arrival_frames;
+static uint32_t g_balance_last_frame;
+static uint32_t g_balance_stage_start_ticks;
+static uint32_t g_timer_10ms_ticks;
+static bool g_timer_running;
+static uint8_t g_circle_depart_ticks;
+static uint8_t g_circle_finish_ticks;
+static bool g_circle_departed;
+static bool g_circle_finish_requested;
+static bool g_ab_started;
+static bool g_ab_stopping;
+static uint8_t g_ab_stop_stable_ticks;
+static uint16_t g_ab_stop_ticks;
+static bool g_ab_stopped;
 
 static void Key_Init(void);
 static void Key_Update10ms(void);
@@ -65,37 +104,116 @@ static void State_Operation(void);
 static void Display_Update10ms(void);
 static const char *Display_StateName(enum CAR_STATE state);
 static void InitialLimit_Update10ms(void);
-static void ABCDA_SendFixedPositionOnce(void);
+static bool State_UsesStepControl(enum CAR_STATE state);
+static void Balance_TaskUpdate(void);
 
-static void ABCDA_SendFixedPositionOnce(void)
+static bool State_UsesStepControl(enum CAR_STATE state)
 {
-    int32_t minimum_position;
-    int32_t maximum_position;
-    int32_t target;
-    uint8_t direction;
-    float position_degree;
+    return (state == CAR_STATE_BALANCE) ||
+           (state == CAR_STATE_ABCDA_BALANCE_CENTER) ||
+           (state == CAR_STATE_AB_BALANCE);
+}
 
-    if (!ZDT_CAN_GetMotorLimits(
-            CAL_MOTOR_ADDRESS, &minimum_position, &maximum_position))
+static void Balance_TaskUpdate(void)
+{
+    const K230_LinkData *link = K230_Link_GetData();
+    int16_t target;
+    int16_t target_error;
+
+    if ((g_balance_stage == 0U) || (g_balance_stage >= 5U))
     {
         return;
     }
 
-    target = minimum_position + ABCDA_TEST_OFFSET_TENTH_DEG;
-    if (target > maximum_position)
+    if (!K230_Link_IsValid(500U) || !link->detected ||
+        (link->frame_count == g_balance_last_frame))
     {
-        target = maximum_position;
+        return;
     }
+    g_balance_last_frame = link->frame_count;
 
-    direction = (target < 0) ? 1U : 0U;
-    position_degree =
-        (target < 0) ? (float)-target / 10.0f : (float)target / 10.0f;
+    target = ((g_balance_stage == 1U) ||
+              (g_balance_stage == 2U)) ?
+        BALANCE_NEGATIVE_TARGET_PIXELS :
+        BALANCE_POSITIVE_TARGET_PIXELS;
+    target_error = (int16_t)(link->dx - target);
 
-    X_V2_En_Control(CAL_MOTOR_ADDRESS, true, false);
-    X_V2_Traj_Pos_Control(
-        CAL_MOTOR_ADDRESS, direction,
-        ABCDA_TEST_ACCEL_RPM_S, ABCDA_TEST_ACCEL_RPM_S,
-        ABCDA_TEST_SPEED_RPM, position_degree, 1U, false);
+    if (g_balance_stage == 1U)
+    {
+        if ((link->dx <=
+             (BALANCE_NEGATIVE_TARGET_PIXELS +
+              BALANCE_SWITCH_LEAD_PIXELS)) ||
+            ((g_timer_10ms_ticks - g_balance_stage_start_ticks) >=
+             BALANCE_FIRST_TIME_TICKS))
+        {
+            g_balance_stage = 2U;
+            g_balance_arrival_frames = 0U;
+            g_balance_stage_start_ticks = g_timer_10ms_ticks;
+            StepControl_SetTargetOffsetPixels(
+                BALANCE_NEGATIVE_TARGET_PIXELS);
+        }
+    }
+    else if (g_balance_stage == 2U)
+    {
+        if ((target_error <= BALANCE_ONE_CM_PIXELS) &&
+            (target_error >= -BALANCE_ONE_CM_PIXELS))
+        {
+            if (g_balance_arrival_frames < BALANCE_ARRIVAL_FRAMES)
+            {
+                g_balance_arrival_frames++;
+            }
+        }
+        else
+        {
+            g_balance_arrival_frames = 0U;
+        }
+
+        if (g_balance_arrival_frames >= BALANCE_ARRIVAL_FRAMES)
+        {
+            g_balance_stage = 3U;
+            g_balance_arrival_frames = 0U;
+            g_balance_stage_start_ticks = g_timer_10ms_ticks;
+            (void)StepControl_SetOpenLoopPositionTenths(
+                BALANCE_LEVEL_POSITION_TENTHS +
+                BALANCE_SECOND_TILT_TENTHS);
+        }
+    }
+    else if (g_balance_stage == 3U)
+    {
+        if ((link->dx >=
+             (BALANCE_POSITIVE_TARGET_PIXELS -
+              BALANCE_SWITCH_LEAD_PIXELS)) ||
+            ((g_timer_10ms_ticks - g_balance_stage_start_ticks) >=
+             BALANCE_SECOND_TIME_TICKS))
+        {
+            g_balance_stage = 4U;
+            g_balance_arrival_frames = 0U;
+            g_balance_stage_start_ticks = g_timer_10ms_ticks;
+            StepControl_SetTargetOffsetPixels(
+                BALANCE_POSITIVE_TARGET_PIXELS);
+        }
+    }
+    else
+    {
+        if ((target_error <= BALANCE_ONE_CM_PIXELS) &&
+            (target_error >= -BALANCE_ONE_CM_PIXELS))
+        {
+            if (g_balance_arrival_frames < BALANCE_ARRIVAL_FRAMES)
+            {
+                g_balance_arrival_frames++;
+            }
+        }
+        else
+        {
+            g_balance_arrival_frames = 0U;
+        }
+
+        if (g_balance_arrival_frames >= BALANCE_ARRIVAL_FRAMES)
+        {
+            g_balance_stage = 5U;
+            g_timer_running = false;
+        }
+    }
 }
 
 void TIMG7_IRQHandler(void)
@@ -119,6 +237,7 @@ int main(void)
     SYSCFG_DL_init();
     Key_Init();
     Motor_Init();
+    Encoder_Init();
     Grayscale_Sensor_Init();
     LineFollow_Init();
     K230_Link_Init();
@@ -146,11 +265,16 @@ int main(void)
             __enable_irq();
 
             Key_Update10ms();
+            Encoder_Update10ms();
             K230_Link_Update10ms();
             ZDT_CAN_PollRx();
             InitialLimit_Update10ms();
             State_Update();
             State_Operation();
+            if (g_timer_running && (g_timer_10ms_ticks < 9999U))
+            {
+                g_timer_10ms_ticks++;
+            }
             Display_Update10ms();
         }
         else
@@ -250,6 +374,55 @@ static void State_Update(void)
 
     g_next_state = g_current_state;
 
+    /*
+     * KEY3 clears the timer except in a completed AB run. In BALANCE it also restarts the complete
+     * -5 cm to +5 cm task from the current, center-balanced condition.
+     */
+    if ((g_key_pressed_event & 0x04U) != 0U)
+    {
+        if ((g_current_state == CAR_STATE_AB_BALANCE) &&
+            !g_ab_started)
+        {
+            g_timer_10ms_ticks = 0U;
+            g_timer_running = true;
+            g_ab_started = true;
+            g_ab_stopping = false;
+            g_ab_stop_stable_ticks = 0U;
+            g_ab_stop_ticks = 0U;
+            Encoder_Clear();
+            LineFollow_ResetSoft();
+            LineFollow_SetTargetBasePWM(AB_CRUISE_PWM);
+            Motor_Enable(true);
+        }
+        else if (g_current_state != CAR_STATE_AB_BALANCE)
+        {
+            g_timer_10ms_ticks = 0U;
+            g_timer_running = false;
+            if (g_current_state == CAR_STATE_BALANCE)
+            {
+                g_balance_stage = 1U;
+                g_balance_arrival_frames = 0U;
+                g_balance_last_frame = K230_Link_GetData()->frame_count;
+                g_balance_stage_start_ticks = 0U;
+                if (StepControl_SetOpenLoopPositionTenths(
+                        BALANCE_LEVEL_POSITION_TENTHS +
+                        BALANCE_FIRST_TILT_TENTHS))
+                {
+                    g_timer_running = true;
+                }
+                else
+                {
+                    g_balance_stage = 0U;
+                }
+            }
+            else if ((g_current_state == CAR_STATE_MOVECIRCLE) &&
+                     !g_circle_finish_requested)
+            {
+                g_timer_running = true;
+            }
+        }
+    }
+
     switch (g_current_state)
     {
         case CAR_STATE_IDLE:
@@ -280,6 +453,15 @@ static void State_Update(void)
             break;
 
         case CAR_STATE_MOVECIRCLE:
+            if (g_circle_finish_requested)
+            {
+                g_next_state = CAR_STATE_IDLE;
+            }
+            else if ((g_key_pressed_event & 0x08U) != 0U)
+            {
+                g_next_state = CAR_STATE_IDLE;
+            }
+            break;
         case CAR_STATE_BALANCE:
         case CAR_STATE_ABCDA_BALANCE_CENTER:
         case CAR_STATE_AB_BALANCE:
@@ -313,20 +495,39 @@ static void State_Enter(enum CAR_STATE state)
     {
         case CAR_STATE_IDLE:
             break;
-        case CAR_STATE_ABCDA_BALANCE_CENTER:
-            ABCDA_SendFixedPositionOnce();
-            break;
         case CAR_STATE_STOPPED:
             break;
         case CAR_STATE_MOVECIRCLE:
+            g_circle_depart_ticks = 0U;
+            g_circle_finish_ticks = 0U;
+            g_circle_departed = false;
+            g_circle_finish_requested = false;
+            g_timer_10ms_ticks = 0U;
+            g_timer_running = true;
             LineFollow_Reset();
             Motor_Enable(true);
             break;
         case CAR_STATE_AB_BALANCE:
+            g_ab_started = false;
+            g_ab_stopping = false;
+            g_ab_stop_stable_ticks = 0U;
+            g_ab_stop_ticks = 0U;
+            g_ab_stopped = false;
+            g_timer_running = false;
+            Motor_Coast();
+            LineFollow_ResetSoft();
+            StepControl_Enter();
+            StepControl_SetTargetOffsetPixels(0);
+            break;
+        case CAR_STATE_ABCDA_BALANCE_CENTER:
             StepControl_Enter();
             break;
         case CAR_STATE_BALANCE:
-            /* Reserved for a future application feature. */
+            g_balance_stage = 0U;
+            g_balance_arrival_frames = 0U;
+            g_balance_last_frame = K230_Link_GetData()->frame_count;
+            StepControl_Enter();
+            StepControl_SetTargetOffsetPixels(0);
             break;
         default:
             break;
@@ -338,19 +539,32 @@ static void State_Exit(enum CAR_STATE state)
     switch (state)
     {
         case CAR_STATE_MOVECIRCLE:
-            Motor_Coast();
+            g_timer_running = false;
+            if (g_circle_finish_requested)
+            {
+                Motor_Brake();
+            }
+            else
+            {
+                Motor_Coast();
+            }
             LineFollow_Reset();
-            break;
-        case CAR_STATE_ABCDA_BALANCE_CENTER:
-            X_V2_Stop_Now(CAL_MOTOR_ADDRESS, false);
             break;
         case CAR_STATE_IDLE:
         case CAR_STATE_STOPPED:
             break;
         case CAR_STATE_AB_BALANCE:
+            g_timer_running = false;
+            Motor_Coast();
+            LineFollow_ResetSoft();
+            StepControl_Exit();
+            break;
+        case CAR_STATE_ABCDA_BALANCE_CENTER:
             StepControl_Exit();
             break;
         case CAR_STATE_BALANCE:
+            g_timer_running = false;
+            StepControl_Exit();
             break;
         default:
             break;
@@ -365,16 +579,161 @@ static void State_Operation(void)
             /* TODO: idle action */
             break;
         case CAR_STATE_MOVECIRCLE:
+        {
+            LineFollow_Status line_status;
+            bool stop_line_detected;
+            uint8_t right_black_count;
+            uint8_t right_bits;
+
             LineFollow_Update10ms();
+            line_status = LineFollow_GetStatus();
+            right_bits =
+                (uint8_t)(line_status.sensor_mask & CIRCLE_RIGHT5_MASK);
+            right_black_count = 0U;
+            if ((right_bits & 0x08U) != 0U)
+            {
+                right_black_count++;
+            }
+            if ((right_bits & 0x10U) != 0U)
+            {
+                right_black_count++;
+            }
+            if ((right_bits & 0x20U) != 0U)
+            {
+                right_black_count++;
+            }
+            if ((right_bits & 0x40U) != 0U)
+            {
+                right_black_count++;
+            }
+            if ((right_bits & 0x80U) != 0U)
+            {
+                right_black_count++;
+            }
+            /*
+             * Stop for four of the five right-side channels, all three
+             * rightmost channels, or at least five sensors overall.
+             */
+            stop_line_detected =
+                (right_black_count >= 4U) ||
+                ((line_status.sensor_mask & CIRCLE_RIGHT3_MASK) ==
+                 CIRCLE_RIGHT3_MASK) ||
+                (line_status.black_count >= 5U);
+
+            if (!g_circle_departed)
+            {
+                if (!stop_line_detected)
+                {
+                    if (g_circle_depart_ticks < CIRCLE_DEPART_TICKS)
+                    {
+                        g_circle_depart_ticks++;
+                    }
+                    if (g_circle_depart_ticks >= CIRCLE_DEPART_TICKS)
+                    {
+                        g_circle_departed = true;
+                    }
+                }
+                else
+                {
+                    g_circle_depart_ticks = 0U;
+                }
+            }
+            else if (stop_line_detected)
+            {
+                if (g_circle_finish_ticks < CIRCLE_FINISH_TICKS)
+                {
+                    g_circle_finish_ticks++;
+                }
+                if (g_circle_finish_ticks >= CIRCLE_FINISH_TICKS)
+                {
+                    Motor_Brake();
+                    g_timer_running = false;
+                    g_circle_finish_requested = true;
+                }
+            }
+            else
+            {
+                g_circle_finish_ticks = 0U;
+            }
             break;
+        }
         case CAR_STATE_AB_BALANCE:
+        {
+            Encoder_Status encoder = Encoder_GetStatus();
+            int32_t left_count = encoder.left_count;
+            int32_t right_count = encoder.right_count;
+            int32_t travelled;
+            int32_t remaining;
+            int16_t target_pwm;
+
+            StepControl_Update10ms();
+            if (g_ab_stopped)
+            {
+                break;
+            }
+            if (left_count < 0) left_count = -left_count;
+            if (right_count < 0) right_count = -right_count;
+            travelled = (left_count + right_count) / 2L;
+
+            if (!g_ab_started)
+            {
+                break;
+            }
+
+            remaining = AB_TARGET_ENCODER_COUNTS - travelled;
+            if (!g_ab_stopping && (remaining <= AB_BRAKE_ENCODER_COUNTS))
+            {
+                g_ab_stopping = true;
+                g_ab_stop_ticks = 0U;
+            }
+            if (g_ab_stopping)
+            {
+                g_ab_stop_ticks++;
+                if (remaining <= 0L)
+                {
+                    target_pwm = 0;
+                }
+                else
+                {
+                    target_pwm = (int16_t)(
+                        ((int32_t)AB_CRUISE_PWM * remaining) /
+                        AB_BRAKE_ENCODER_COUNTS);
+                }
+                LineFollow_SetTargetBasePWM(target_pwm);
+            }
+
+            LineFollow_Update10ms();
+            if (g_ab_stopping &&
+                (remaining <= 0L) &&
+                (encoder.left_rpm <= AB_STOP_RPM) &&
+                (encoder.left_rpm >= -AB_STOP_RPM) &&
+                (encoder.right_rpm <= AB_STOP_RPM) &&
+                (encoder.right_rpm >= -AB_STOP_RPM))
+            {
+                if (g_ab_stop_stable_ticks < AB_STOP_STABLE_TICKS)
+                {
+                    g_ab_stop_stable_ticks++;
+                }
+            }
+            else
+            {
+                g_ab_stop_stable_ticks = 0U;
+            }
+            if ((g_ab_stop_stable_ticks >= AB_STOP_STABLE_TICKS) ||
+                (g_ab_stop_ticks >= AB_STOP_TIMEOUT_TICKS))
+            {
+                Motor_Coast();
+                g_timer_running = false;
+                g_ab_stopped = true;
+            }
+            break;
+        }
+        case CAR_STATE_ABCDA_BALANCE_CENTER:
             StepControl_Update10ms();
             break;
         case CAR_STATE_BALANCE:
-            /* Reserved for a future application feature. */
-            break;
-        case CAR_STATE_ABCDA_BALANCE_CENTER:
-            /* Fixed-position test: intentionally send no repeated commands. */
+            StepControl_Update10ms();
+            Balance_TaskUpdate();
             break;
         case CAR_STATE_STOPPED:
             /* TODO: stop action */
@@ -439,10 +798,31 @@ static const char *Display_StateName(enum CAR_STATE state)
     }
 }
 
+static void Display_EncoderStatus(void)
+{
+    Encoder_Status encoder = Encoder_GetStatus();
+
+    OLED_ClearArea(0U, 16U, 128U, 8U);
+    OLED_ShowString(0U, 16U, "EL:", OLED_6X8);
+    OLED_ShowSignedNum(18U, 16U, encoder.left_count, 7U, OLED_6X8);
+    OLED_ShowString(72U, 16U, "R:", OLED_6X8);
+    OLED_ShowSignedNum(84U, 16U, encoder.left_rpm, 4U, OLED_6X8);
+    OLED_UpdateArea(0U, 16U, 128U, 8U);
+
+    OLED_ClearArea(0U, 24U, 128U, 8U);
+    OLED_ShowString(0U, 24U, "ER:", OLED_6X8);
+    OLED_ShowSignedNum(18U, 24U, encoder.right_count, 7U, OLED_6X8);
+    OLED_ShowString(72U, 24U, "R:", OLED_6X8);
+    OLED_ShowSignedNum(84U, 24U, encoder.right_rpm, 4U, OLED_6X8);
+    OLED_UpdateArea(0U, 24U, 128U, 8U);
+}
+
 static void Display_Update10ms(void)
 {
     static uint8_t heartbeat_ticks;
     static uint8_t position_display_ticks;
+    static uint8_t timer_display_ticks;
+    static uint8_t encoder_display_ticks;
     static enum CAR_STATE last_state = CAR_STATE_STOPPED;
     static enum CAR_STATE last_selected_state = CAR_STATE_STOPPED;
     static uint8_t last_heartbeat = 0xFFU;
@@ -452,6 +832,8 @@ static void Display_Update10ms(void)
 
     heartbeat_ticks++;
     position_display_ticks++;
+    timer_display_ticks++;
+    encoder_display_ticks++;
     if (heartbeat_ticks >= OLED_HEARTBEAT_TICKS)
     {
         heartbeat_ticks = 0U;
@@ -479,7 +861,7 @@ static void Display_Update10ms(void)
         last_heartbeat = g_oled_heartbeat;
 
         OLED_ClearArea(0U, 8U, 120U, 8U);
-        if (g_current_state == CAR_STATE_AB_BALANCE)
+        if (State_UsesStepControl(g_current_state))
         {
             StepControl_Status status = StepControl_GetStatus();
             OLED_ShowString(0U, 8U, "LK:", OLED_6X8);
@@ -489,45 +871,8 @@ static void Display_Update10ms(void)
             OLED_ShowSignedNum(48U, 8U, status.error, 4U, OLED_6X8);
         }
         OLED_UpdateArea(0U, 8U, 120U, 8U);
-        OLED_ClearArea(0U, 16U, 120U, 8U);
-        if (g_current_state == CAR_STATE_AB_BALANCE)
-        {
-            StepControl_Status status = StepControl_GetStatus();
-            OLED_ShowString(0U, 16U, "PID:", OLED_6X8);
-            OLED_ShowSignedNum(
-                24U, 16U, status.output_rpm, 3U, OLED_6X8);
-            OLED_ShowString(48U, 16U, "B:", OLED_6X8);
-            OLED_ShowNum(
-                60U, 16U, K230_Link_GetRxByteCount() % 1000U,
-                3U, OLED_6X8);
-            OLED_ShowString(84U, 16U, "F:", OLED_6X8);
-            OLED_ShowNum(
-                96U, 16U,
-                K230_Link_GetData()->frame_count % 1000U,
-                3U, OLED_6X8);
-        }
-        OLED_UpdateArea(0U, 16U, 120U, 8U);
-        OLED_ClearArea(0U, 24U, 120U, 8U);
-        if (g_current_state == CAR_STATE_AB_BALANCE)
-        {
-            OLED_ShowString(0U, 24U, "D:", OLED_6X8);
-            OLED_ShowNum(
-                12U, 24U, K230_Link_GetData()->detected ? 1U : 0U,
-                1U, OLED_6X8);
-            OLED_ShowString(24U, 24U, "C:", OLED_6X8);
-            OLED_ShowNum(
-                36U, 24U, ZDT_CAN_GetLastStatus(), 1U, OLED_6X8);
-            OLED_ShowString(48U, 24U, "L:", OLED_6X8);
-            OLED_ShowNum(
-                60U, 24U, ZDT_CAN_GetLastErrorCode(), 1U, OLED_6X8);
-            OLED_ShowString(72U, 24U, "T:", OLED_6X8);
-            OLED_ShowNum(
-                84U, 24U, ZDT_CAN_GetTxErrorCount(), 3U, OLED_6X8);
-            OLED_ShowString(108U, 24U, "B:", OLED_6X8);
-            OLED_ShowNum(
-                120U, 24U, ZDT_CAN_GetBusOffStatus(), 1U, OLED_6X8);
-        }
-        OLED_UpdateArea(0U, 24U, 128U, 8U);
+        Display_EncoderStatus();
+        encoder_display_ticks = 0U;
     }
     else if (heartbeat_changed != 0U)
     {
@@ -539,7 +884,7 @@ static void Display_Update10ms(void)
         OLED_ShowChar(
             114U, 0U, (g_oled_heartbeat != 0U) ? '*' : ' ', OLED_6X8);
         OLED_UpdateArea(0U, 0U, 120U, 8U);
-        if (g_current_state == CAR_STATE_AB_BALANCE)
+        if (State_UsesStepControl(g_current_state))
         {
             StepControl_Status status = StepControl_GetStatus();
             OLED_ClearArea(0U, 8U, 120U, 8U);
@@ -549,40 +894,14 @@ static void Display_Update10ms(void)
             OLED_ShowString(36U, 8U, "E:", OLED_6X8);
             OLED_ShowSignedNum(48U, 8U, status.error, 4U, OLED_6X8);
             OLED_UpdateArea(0U, 8U, 120U, 8U);
-            OLED_ClearArea(0U, 16U, 120U, 8U);
-            OLED_ShowString(0U, 16U, "PID:", OLED_6X8);
-            OLED_ShowSignedNum(
-                24U, 16U, status.output_rpm, 3U, OLED_6X8);
-            OLED_ShowString(48U, 16U, "B:", OLED_6X8);
-            OLED_ShowNum(
-                60U, 16U, K230_Link_GetRxByteCount() % 1000U,
-                3U, OLED_6X8);
-            OLED_ShowString(84U, 16U, "F:", OLED_6X8);
-            OLED_ShowNum(
-                96U, 16U,
-                K230_Link_GetData()->frame_count % 1000U,
-                3U, OLED_6X8);
-            OLED_UpdateArea(0U, 16U, 120U, 8U);
-            OLED_ClearArea(0U, 24U, 128U, 8U);
-            OLED_ShowString(0U, 24U, "D:", OLED_6X8);
-            OLED_ShowNum(
-                12U, 24U, K230_Link_GetData()->detected ? 1U : 0U,
-                1U, OLED_6X8);
-            OLED_ShowString(24U, 24U, "C:", OLED_6X8);
-            OLED_ShowNum(
-                36U, 24U, ZDT_CAN_GetLastStatus(), 1U, OLED_6X8);
-            OLED_ShowString(48U, 24U, "L:", OLED_6X8);
-            OLED_ShowNum(
-                60U, 24U, ZDT_CAN_GetLastErrorCode(), 1U, OLED_6X8);
-            OLED_ShowString(72U, 24U, "T:", OLED_6X8);
-            OLED_ShowNum(
-                84U, 24U, ZDT_CAN_GetTxErrorCount(), 3U, OLED_6X8);
-            OLED_ShowString(108U, 24U, "B:", OLED_6X8);
-            OLED_ShowNum(
-                120U, 24U, ZDT_CAN_GetBusOffStatus(), 1U, OLED_6X8);
-            OLED_UpdateArea(0U, 24U, 128U, 8U);
         }
         last_heartbeat = g_oled_heartbeat;
+    }
+
+    if (encoder_display_ticks >= 10U)
+    {
+        encoder_display_ticks = 0U;
+        Display_EncoderStatus();
     }
 
     if (position_display_ticks >= 10U)
@@ -613,5 +932,21 @@ static void Display_Update10ms(void)
             OLED_ShowString(30U, 32U, "WAIT", OLED_6X8);
         }
         OLED_UpdateArea(0U, 32U, 128U, 8U);
+    }
+
+    if (timer_display_ticks >= 5U)
+    {
+        uint32_t seconds;
+        uint32_t hundredths;
+
+        timer_display_ticks = 0U;
+        seconds = (g_timer_10ms_ticks / 100U) % 100U;
+        hundredths = g_timer_10ms_ticks % 100U;
+        OLED_ClearArea(0U, 40U, 128U, 8U);
+        OLED_ShowString(0U, 40U, "TIME:", OLED_6X8);
+        OLED_ShowNum(30U, 40U, seconds, 2U, OLED_6X8);
+        OLED_ShowChar(42U, 40U, ':', OLED_6X8);
+        OLED_ShowNum(48U, 40U, hundredths, 2U, OLED_6X8);
+        OLED_UpdateArea(0U, 40U, 128U, 8U);
     }
 }

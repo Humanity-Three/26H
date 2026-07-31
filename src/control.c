@@ -15,6 +15,7 @@ static LineFollow_Status g_line_status;
 static int16_t g_line_last_error;
 static int32_t g_line_integral;
 static int16_t g_line_current_base_pwm;
+static int16_t g_line_target_base_pwm;
 
 static int16_t LineFollow_Clamp(int32_t value, int16_t limit)
 {
@@ -43,12 +44,33 @@ void LineFollow_Reset(void)
      * 始终落在电机死区内，看起来会像 KEY2 没有启动电机。
      */
     g_line_current_base_pwm = 640;
+    g_line_target_base_pwm = g_line_config.base_pwm;
     g_line_status.sensor_mask = 0U;
     g_line_status.black_count = 0U;
     g_line_status.error = 0;
     g_line_status.turn_pwm = 0;
     g_line_status.line_lost = true;
     g_line_status.cross_line = false;
+}
+
+void LineFollow_ResetSoft(void)
+{
+    LineFollow_Reset();
+    g_line_current_base_pwm = 0;
+    g_line_target_base_pwm = 0;
+}
+
+void LineFollow_SetTargetBasePWM(int16_t base_pwm)
+{
+    if (base_pwm < 0)
+    {
+        base_pwm = 0;
+    }
+    else if (base_pwm > MOTOR_PWM_MAX)
+    {
+        base_pwm = MOTOR_PWM_MAX;
+    }
+    g_line_target_base_pwm = base_pwm;
 }
 
 void LineFollow_SetConfig(const LineFollow_Config *config)
@@ -124,13 +146,22 @@ void LineFollow_Update10ms(void)
                  (int32_t)g_line_config.ki * g_line_integral +
                  (int32_t)g_line_config.kd * derivative;
     /* 从可靠起转值平滑升至 25E 已验证的巡航值。 */
-    if (g_line_current_base_pwm < g_line_config.base_pwm)
+    if (g_line_current_base_pwm < g_line_target_base_pwm)
     {
         g_line_current_base_pwm =
-            (int16_t)(g_line_current_base_pwm + 40);
-        if (g_line_current_base_pwm > g_line_config.base_pwm)
+            (int16_t)(g_line_current_base_pwm + 10);
+        if (g_line_current_base_pwm > g_line_target_base_pwm)
         {
-            g_line_current_base_pwm = g_line_config.base_pwm;
+            g_line_current_base_pwm = g_line_target_base_pwm;
+        }
+    }
+    else if (g_line_current_base_pwm > g_line_target_base_pwm)
+    {
+        g_line_current_base_pwm =
+            (int16_t)(g_line_current_base_pwm - 10);
+        if (g_line_current_base_pwm < g_line_target_base_pwm)
+        {
+            g_line_current_base_pwm = g_line_target_base_pwm;
         }
     }
 

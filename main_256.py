@@ -29,7 +29,7 @@ import aidemo
 
 # ======================== 配置参数 ========================
 
-KMODEL_PATH = "/sdcard/steel_ball_256.kmodel"
+KMODEL_PATH = "/sdcard/steel_ball_v6_256.kmodel"
 LABELS = ["steel_ball"]
 MODEL_INPUT_SIZE = [256, 256]
 
@@ -60,8 +60,8 @@ UART_SEND_INTERVAL = 1
 UART_DEBUG = False
 
 # --- 基准中心点 ---
-CENTER_X = 401
-CENTER_Y = 172
+CENTER_X = 345
+CENTER_Y = 192
 OFFSET_SCALE = 1.0
 ALIGN_DEAD_ZONE = 2
 

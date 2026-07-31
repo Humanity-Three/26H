@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define MOTOR_PWM_MAX                       (2500)
-#define MOTOR_LEFT_FORWARD_REVERSED         (1)
+#define MOTOR_LEFT_FORWARD_REVERSED         (0)
 #define MOTOR_RIGHT_FORWARD_REVERSED        (1)
 
 /* Official 26-magnet encoder: 13 pulses * quadrature x4 * gearbox 30. */

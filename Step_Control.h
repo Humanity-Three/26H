@@ -14,6 +14,9 @@ typedef struct
 
 void StepControl_Init(void);
 void StepControl_Enter(void);
+void StepControl_SetTargetOffsetPixels(int16_t offset_pixels);
+bool StepControl_SetOpenLoopOutputTenths(int16_t output_tenths);
+bool StepControl_SetOpenLoopPositionTenths(int32_t position_tenths);
 void StepControl_Update10ms(void);
 void StepControl_Exit(void);
 StepControl_Status StepControl_GetStatus(void);

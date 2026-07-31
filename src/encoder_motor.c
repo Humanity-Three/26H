@@ -284,11 +284,16 @@ void Encoder_Update10ms(void)
     int32_t right;
     int32_t left_delta;
     int32_t right_delta;
+    uint32_t primask;
 
+    primask = __get_PRIMASK();
     __disable_irq();
     left = g_encoder_left_count;
     right = g_encoder_right_count;
-    __enable_irq();
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
 
     left_delta = left - g_encoder_last_left;
     right_delta = right - g_encoder_last_right;
@@ -307,10 +312,15 @@ void Encoder_Update10ms(void)
 
 void Encoder_Clear(void)
 {
+    uint32_t primask = __get_PRIMASK();
+
     __disable_irq();
     g_encoder_left_count = 0;
     g_encoder_right_count = 0;
-    __enable_irq();
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
     g_encoder_last_left = 0;
     g_encoder_last_right = 0;
     g_encoder_status.left_count = 0;
