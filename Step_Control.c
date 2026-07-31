@@ -32,6 +32,18 @@
 #define STEP_PID_KD_NUM             (2200)
 #define STEP_PID_GAIN_DEN           (1000)
 
+/* BALANCE -5 cm to +5 cm velocity/position coupled capture profile. */
+#define STEP_PROFILE_KP_AWAY_NUM    (170)
+#define STEP_PROFILE_KD_BRAKE_NUM   (3300)
+#define STEP_PROFILE_BRAKE_ACCEL    (3L)
+#define STEP_PROFILE_NEAR_PIXELS    (20)
+#define STEP_PROFILE_MIDDLE_PIXELS  (48)
+#define STEP_PROFILE_FAR_PIXELS     (96)
+#define STEP_PROFILE_NEAR_LIMIT_TENTHS   (100)
+#define STEP_PROFILE_MIDDLE_LIMIT_TENTHS (180)
+#define STEP_PROFILE_FAR_LIMIT_TENTHS    (300)
+#define STEP_PROFILE_MAX_LIMIT_TENTHS    (450)
+
 static StepControl_Status g_step_status;
 static int16_t g_previous_error;
 static int16_t g_filtered_error;
@@ -48,6 +60,7 @@ static bool g_filter_valid;
 static bool g_target_position_valid;
 static bool g_loss_stop_sent;
 static bool g_open_loop_active;
+static bool g_velocity_profile_enabled;
 static bool g_active;
 
 static void StepControl_SendPosition(int32_t target_tenth_degree)
@@ -153,6 +166,7 @@ void StepControl_Init(void)
     g_target_position_valid = false;
     g_loss_stop_sent = false;
     g_open_loop_active = false;
+    g_velocity_profile_enabled = false;
 }
 
 void StepControl_Enter(void)
@@ -179,6 +193,11 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_filtered_derivative = 0;
     g_output_tenths = 0;
     g_filter_valid = false;
+}
+
+void StepControl_EnableVelocityProfile(bool enable)
+{
+    g_velocity_profile_enabled = enable;
 }
 
 bool StepControl_SetOpenLoopOutputTenths(int16_t output_tenths)
@@ -232,6 +251,7 @@ bool StepControl_SetOpenLoopOutputTenths(int16_t output_tenths)
     }
 
     g_open_loop_active = true;
+    g_velocity_profile_enabled = false;
     g_last_target_position = target;
     g_target_position_valid = true;
     g_step_status.link_valid = true;
@@ -264,6 +284,7 @@ bool StepControl_SetOpenLoopPositionTenths(int32_t position_tenths)
     }
 
     g_open_loop_active = true;
+    g_velocity_profile_enabled = false;
     g_last_target_position = position_tenths;
     g_target_position_valid = true;
     g_step_status.link_valid = true;
@@ -282,6 +303,9 @@ void StepControl_Update10ms(void)
     int32_t candidate_integral;
     int32_t unsaturated_output;
     int32_t output;
+    int32_t position_gain_num;
+    int32_t derivative_gain_num;
+    int16_t profile_output_limit_tenths;
     bool control_updated = false;
     bool first_filtered_sample = false;
 
@@ -368,6 +392,56 @@ void StepControl_Update10ms(void)
                 ((int32_t)g_filtered_derivative +
                  3L * derivative) / 4L);
             derivative = g_filtered_derivative;
+
+            position_gain_num = STEP_PID_KP_NUM;
+            derivative_gain_num = STEP_PID_KD_NUM;
+            profile_output_limit_tenths = STEP_CONTROL_MAX_RPM * 10;
+            if (g_velocity_profile_enabled)
+            {
+                int32_t absolute_error =
+                    (error < 0) ? -(int32_t)error : (int32_t)error;
+                int32_t absolute_velocity =
+                    (derivative < 0) ?
+                    -(int32_t)derivative : (int32_t)derivative;
+                int32_t stopping_distance =
+                    (absolute_velocity * absolute_velocity) /
+                    (2L * STEP_PROFILE_BRAKE_ACCEL);
+
+                if (((error > 0) && (derivative > 0)) ||
+                    ((error < 0) && (derivative < 0)))
+                {
+                    /* The ball is moving away: apply a firmer recovery pull. */
+                    position_gain_num = STEP_PROFILE_KP_AWAY_NUM;
+                }
+                else if ((((error > 0) && (derivative < 0)) ||
+                          ((error < 0) && (derivative > 0))) &&
+                         (stopping_distance >= absolute_error))
+                {
+                    /* Approaching too fast: brake before crossing the target. */
+                    derivative_gain_num = STEP_PROFILE_KD_BRAKE_NUM;
+                }
+
+                if (absolute_error <= STEP_PROFILE_NEAR_PIXELS)
+                {
+                    profile_output_limit_tenths =
+                        STEP_PROFILE_NEAR_LIMIT_TENTHS;
+                }
+                else if (absolute_error <= STEP_PROFILE_MIDDLE_PIXELS)
+                {
+                    profile_output_limit_tenths =
+                        STEP_PROFILE_MIDDLE_LIMIT_TENTHS;
+                }
+                else if (absolute_error <= STEP_PROFILE_FAR_PIXELS)
+                {
+                    profile_output_limit_tenths =
+                        STEP_PROFILE_FAR_LIMIT_TENTHS;
+                }
+                else
+                {
+                    profile_output_limit_tenths =
+                        STEP_PROFILE_MAX_LIMIT_TENTHS;
+                }
+            }
             if (error == 0)
             {
                 /*
@@ -418,13 +492,15 @@ void StepControl_Update10ms(void)
                 }
 
                 unsaturated_output =
-                    (int32_t)STEP_PID_KP_NUM * error +
+                    position_gain_num * error +
                     (int32_t)STEP_PID_KI_NUM * candidate_integral +
-                    (int32_t)STEP_PID_KD_NUM * derivative;
+                    derivative_gain_num * derivative;
                 unsaturated_output /= STEP_PID_GAIN_DEN;
-                if (!((unsaturated_output >= STEP_CONTROL_MAX_RPM &&
+                if (!((unsaturated_output >=
+                       profile_output_limit_tenths / 10 &&
                        error > 0) ||
-                      (unsaturated_output <= -STEP_CONTROL_MAX_RPM &&
+                      (unsaturated_output <=
+                       -profile_output_limit_tenths / 10 &&
                        error < 0)))
                 {
                     g_step_status.integral = candidate_integral;
@@ -436,10 +512,10 @@ void StepControl_Update10ms(void)
              * output, a one-count PID change moved the motor target by about
              * one degree, producing visibly stepped motion.
              */
-            output = (int32_t)STEP_PID_KP_NUM * error +
+            output = position_gain_num * error +
                      (int32_t)STEP_PID_KI_NUM *
                          g_step_status.integral +
-                     (int32_t)STEP_PID_KD_NUM * derivative;
+                     derivative_gain_num * derivative;
             output /= (STEP_PID_GAIN_DEN / 10);
 
             /*
@@ -461,6 +537,8 @@ void StepControl_Update10ms(void)
                     output = -STEP_CONTROL_STICTION_OUTPUT_TENTHS;
                 }
             }
+            output = StepControl_Clamp(
+                output, profile_output_limit_tenths);
             g_step_status.error = error;
             g_output_tenths = StepControl_Clamp(
                 output, STEP_CONTROL_MAX_RPM * 10);

@@ -155,6 +155,7 @@ static void Balance_TaskUpdate(void)
             g_balance_stage_start_ticks = g_timer_10ms_ticks;
             StepControl_SetTargetOffsetPixels(
                 BALANCE_NEGATIVE_TARGET_PIXELS);
+            StepControl_EnableVelocityProfile(true);
         }
     }
     else if (g_balance_stage == 2U)
@@ -195,6 +196,7 @@ static void Balance_TaskUpdate(void)
             g_balance_stage_start_ticks = g_timer_10ms_ticks;
             StepControl_SetTargetOffsetPixels(
                 BALANCE_POSITIVE_TARGET_PIXELS);
+            StepControl_EnableVelocityProfile(true);
         }
     }
     else
