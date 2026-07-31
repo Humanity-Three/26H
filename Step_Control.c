@@ -44,6 +44,7 @@
 #define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
 #define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (80)
 #define STEP_CASCADE_SPEED_KP_NUM   (100L)
+#define STEP_CASCADE_SPEED_KP_AWAY_NUM (130L)
 #define STEP_CASCADE_SPEED_KI_NUM   (0L)
 #define STEP_CASCADE_SPEED_KD_NUM   (90L)
 #define STEP_CASCADE_SPEED_GAIN_DEN (100L)
@@ -90,6 +91,7 @@ static int32_t StepControl_CalculateCascade(
     int32_t target_velocity_x10;
     int32_t speed_error_x10;
     int32_t speed_derivative_x10;
+    int32_t speed_kp_num;
     int32_t output_tenths;
 
     if (error == 0)
@@ -138,6 +140,13 @@ static int32_t StepControl_CalculateCascade(
         speed_error_x10 - g_previous_speed_error_x10;
     g_previous_speed_error_x10 = (int16_t)speed_error_x10;
 
+    speed_kp_num = STEP_CASCADE_SPEED_KP_NUM;
+    if (((error > 0) && (velocity_pixels_per_frame > 0)) ||
+        ((error < 0) && (velocity_pixels_per_frame < 0)))
+    {
+        speed_kp_num = STEP_CASCADE_SPEED_KP_AWAY_NUM;
+    }
+
     g_speed_integral_x10 += speed_error_x10;
     if (g_speed_integral_x10 > STEP_CASCADE_SPEED_INTEGRAL_MAX)
         g_speed_integral_x10 = STEP_CASCADE_SPEED_INTEGRAL_MAX;
@@ -145,7 +154,7 @@ static int32_t StepControl_CalculateCascade(
         g_speed_integral_x10 = -STEP_CASCADE_SPEED_INTEGRAL_MAX;
 
     output_tenths =
-        (STEP_CASCADE_SPEED_KP_NUM * speed_error_x10 +
+        (speed_kp_num * speed_error_x10 +
          STEP_CASCADE_SPEED_KI_NUM * g_speed_integral_x10 +
          STEP_CASCADE_SPEED_KD_NUM * speed_derivative_x10) /
         STEP_CASCADE_SPEED_GAIN_DEN;

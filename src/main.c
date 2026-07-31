@@ -54,18 +54,19 @@ __asm(".global __ARM_use_no_argv\n");
 #define CIRCLE_FINISH_TICKS         (1U)
 #define AB_CRUISE_PWM               (960)
 /* Calibrate this from A to B: average quadrature counts of both wheels. */
-#define AB_TARGET_ENCODER_COUNTS    (10400L)
+#define AB_TARGET_ENCODER_COUNTS    (13520L)
+#define AB_CONTINUOUS_TRACKING      (1)
 #define AB_BRAKE_ENCODER_COUNTS     (2000L)
 #define AB_STOP_RPM                 (3)
 #define AB_STOP_STABLE_TICKS        (10U)
 #define AB_STOP_TIMEOUT_TICKS       (150U)
 #define AB_FEEDFORWARD_SIGN         (1L)
-#define AB_PWM_ACCEL_FF_ACCEL_NUM   (2L)
-#define AB_PWM_ACCEL_FF_BRAKE_NUM   (3L)
-#define AB_ENCODER_ACCEL_FF_NUM     (3L)
+#define AB_PWM_ACCEL_FF_ACCEL_NUM   (4L)
+#define AB_PWM_ACCEL_FF_BRAKE_NUM   (5L)
+#define AB_ENCODER_ACCEL_FF_NUM     (5L)
 #define AB_ENCODER_ACCEL_DEAD_ZONE  (1)
-#define AB_FEEDFORWARD_LIMIT_TENTHS (90)
-#define AB_FEEDFORWARD_SLEW_TENTHS  (8)
+#define AB_FEEDFORWARD_LIMIT_TENTHS (130)
+#define AB_FEEDFORWARD_SLEW_TENTHS  (4)
 
 enum CAR_STATE
 {
@@ -398,7 +399,8 @@ static void State_Update(void)
      */
     if ((g_key_pressed_event & 0x04U) != 0U)
     {
-        if ((g_current_state == CAR_STATE_AB_BALANCE) &&
+        if (((g_current_state == CAR_STATE_AB_BALANCE) ||
+             (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)) &&
             !g_ab_started)
         {
             g_timer_10ms_ticks = 0U;
@@ -416,8 +418,15 @@ static void State_Update(void)
             LineFollow_ResetSoft();
             LineFollow_SetTargetBasePWM(AB_CRUISE_PWM);
             Motor_Enable(true);
+            if (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)
+            {
+                g_circle_depart_ticks = 0U;
+                g_circle_finish_ticks = 0U;
+                g_circle_departed = false;
+            }
         }
-        else if (g_current_state != CAR_STATE_AB_BALANCE)
+        else if ((g_current_state != CAR_STATE_AB_BALANCE) &&
+                 (g_current_state != CAR_STATE_ABCDA_BALANCE_CENTER))
         {
             g_timer_10ms_ticks = 0U;
             g_timer_running = false;
@@ -549,7 +558,22 @@ static void State_Enter(enum CAR_STATE state)
             StepControl_SetFeedforwardTenths(0);
             break;
         case CAR_STATE_ABCDA_BALANCE_CENTER:
+            g_ab_started = false;
+            g_ab_stopping = false;
+            g_ab_stop_stable_ticks = 0U;
+            g_ab_stop_ticks = 0U;
+            g_ab_stopped = false;
+            g_ab_previous_average_pwm = 0;
+            g_ab_previous_average_rpm = 0;
+            g_ab_filtered_pwm_accel = 0;
+            g_ab_filtered_encoder_accel = 0;
+            g_ab_feedforward_tenths = 0;
+            g_timer_running = false;
+            Motor_Coast();
+            LineFollow_ResetSoft();
             StepControl_Enter();
+            StepControl_SetTargetOffsetPixels(0);
+            StepControl_SetFeedforwardTenths(0);
             break;
         case CAR_STATE_BALANCE:
             g_balance_stage = 0U;
@@ -590,6 +614,10 @@ static void State_Exit(enum CAR_STATE state)
             StepControl_Exit();
             break;
         case CAR_STATE_ABCDA_BALANCE_CENTER:
+            g_timer_running = false;
+            Motor_Coast();
+            LineFollow_ResetSoft();
+            StepControl_SetFeedforwardTenths(0);
             StepControl_Exit();
             break;
         case CAR_STATE_BALANCE:
@@ -687,6 +715,7 @@ static void State_Operation(void)
             }
             break;
         }
+        case CAR_STATE_ABCDA_BALANCE_CENTER:
         case CAR_STATE_AB_BALANCE:
         {
             Encoder_Status encoder = Encoder_GetStatus();
@@ -703,6 +732,10 @@ static void State_Operation(void)
             int32_t feedforward_tenths;
             int32_t feedforward_delta;
             int16_t target_pwm;
+            LineFollow_Status line_status;
+            bool stop_line_detected;
+            uint8_t right_black_count;
+            uint8_t right_bits;
 
             average_pwm =
                 ((int32_t)motor.left_pwm + motor.right_pwm) / 2L;
@@ -772,6 +805,61 @@ static void State_Operation(void)
                 break;
             }
 
+#if AB_CONTINUOUS_TRACKING
+            /* Keep following the line until the user changes mode. */
+            LineFollow_Update10ms();
+            if ((g_current_state == CAR_STATE_AB_BALANCE) &&
+                (travelled >= AB_TARGET_ENCODER_COUNTS))
+            {
+                g_timer_running = false;
+            }
+            else if (g_current_state ==
+                     CAR_STATE_ABCDA_BALANCE_CENTER)
+            {
+                line_status = LineFollow_GetStatus();
+                right_bits = (uint8_t)(
+                    line_status.sensor_mask & CIRCLE_RIGHT5_MASK);
+                right_black_count = 0U;
+                if ((right_bits & 0x08U) != 0U) right_black_count++;
+                if ((right_bits & 0x10U) != 0U) right_black_count++;
+                if ((right_bits & 0x20U) != 0U) right_black_count++;
+                if ((right_bits & 0x40U) != 0U) right_black_count++;
+                if ((right_bits & 0x80U) != 0U) right_black_count++;
+                stop_line_detected =
+                    (right_black_count >= 4U) ||
+                    ((line_status.sensor_mask & CIRCLE_RIGHT3_MASK) ==
+                     CIRCLE_RIGHT3_MASK) ||
+                    (line_status.black_count >= 5U);
+
+                if (!g_circle_departed)
+                {
+                    if (!stop_line_detected)
+                    {
+                        if (g_circle_depart_ticks < CIRCLE_DEPART_TICKS)
+                            g_circle_depart_ticks++;
+                        if (g_circle_depart_ticks >= CIRCLE_DEPART_TICKS)
+                            g_circle_departed = true;
+                    }
+                    else
+                    {
+                        g_circle_depart_ticks = 0U;
+                    }
+                }
+                else if (stop_line_detected)
+                {
+                    if (g_circle_finish_ticks < CIRCLE_FINISH_TICKS)
+                        g_circle_finish_ticks++;
+                    if (g_circle_finish_ticks >= CIRCLE_FINISH_TICKS)
+                        g_timer_running = false;
+                }
+                else
+                {
+                    g_circle_finish_ticks = 0U;
+                }
+            }
+            break;
+#endif
+
             remaining = AB_TARGET_ENCODER_COUNTS - travelled;
             if (!g_ab_stopping && (remaining <= AB_BRAKE_ENCODER_COUNTS))
             {
@@ -821,9 +909,6 @@ static void State_Operation(void)
             }
             break;
         }
-        case CAR_STATE_ABCDA_BALANCE_CENTER:
-            StepControl_Update10ms();
-            break;
         case CAR_STATE_BALANCE:
             StepControl_Update10ms();
             Balance_TaskUpdate();
