@@ -17,7 +17,7 @@
 #define STEP_CONTROL_POSITION_EPSILON (2)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
-#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (0)
+#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (26)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
 
 /*
@@ -32,7 +32,25 @@
 #define STEP_PID_KD_NUM             (2200)
 #define STEP_PID_GAIN_DEN           (1000)
 
-/* BALANCE -5 cm to +5 cm velocity/position coupled capture profile. */
+/*
+ * Experimental cascaded controller:
+ * outer position PI -> target ball velocity,
+ * inner velocity PID -> rail/motor output.
+ * Set to 0 to restore the proven single-loop controller below.
+ */
+#define STEP_CONTROL_USE_CASCADE    (1)
+#define STEP_CASCADE_POSITION_KP_NUM (8L)
+#define STEP_CASCADE_POSITION_KI_DIV (500L)
+#define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
+#define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (80)
+#define STEP_CASCADE_SPEED_KP_NUM   (100L)
+#define STEP_CASCADE_SPEED_KI_NUM   (0L)
+#define STEP_CASCADE_SPEED_KD_NUM   (80L)
+#define STEP_CASCADE_SPEED_GAIN_DEN (100L)
+#define STEP_CASCADE_SPEED_INTEGRAL_MAX (2000L)
+#define STEP_CASCADE_OUTPUT_MAX_TENTHS (300L)
+
+/* Global closed-loop velocity/position coupled capture profile. */
 #define STEP_PROFILE_KP_AWAY_NUM    (170)
 #define STEP_PROFILE_KD_BRAKE_NUM   (3300)
 #define STEP_PROFILE_BRAKE_ACCEL    (3L)
@@ -51,6 +69,8 @@ static int16_t g_filtered_derivative;
 static int16_t g_target_offset_pixels;
 static int16_t g_output_tenths;
 static int16_t g_feedforward_tenths;
+static int32_t g_speed_integral_x10;
+static int16_t g_previous_speed_error_x10;
 static uint8_t g_lost_target_ticks;
 static uint32_t g_last_frame_count;
 static int32_t g_last_target_position;
@@ -63,6 +83,78 @@ static bool g_loss_stop_sent;
 static bool g_open_loop_active;
 static bool g_velocity_profile_enabled;
 static bool g_active;
+
+static int32_t StepControl_CalculateCascade(
+    int16_t error, int16_t velocity_pixels_per_frame)
+{
+    int32_t target_velocity_x10;
+    int32_t speed_error_x10;
+    int32_t speed_derivative_x10;
+    int32_t output_tenths;
+
+    if (error == 0)
+    {
+        if (g_step_status.integral > 0)
+        {
+            g_step_status.integral -=
+                (g_step_status.integral +
+                 STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
+                STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
+        }
+        else if (g_step_status.integral < 0)
+        {
+            g_step_status.integral +=
+                (-g_step_status.integral +
+                 STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
+                STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
+        }
+    }
+    else if ((error <= STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
+             (error >= -STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
+             (velocity_pixels_per_frame <= 2) &&
+             (velocity_pixels_per_frame >= -2))
+    {
+        g_step_status.integral += error;
+        if (g_step_status.integral > STEP_CONTROL_INTEGRAL_MAX)
+            g_step_status.integral = STEP_CONTROL_INTEGRAL_MAX;
+        else if (g_step_status.integral < -STEP_CONTROL_INTEGRAL_MAX)
+            g_step_status.integral = -STEP_CONTROL_INTEGRAL_MAX;
+    }
+
+    /* Positive position error requires a negative target ball velocity. */
+    target_velocity_x10 =
+        -((STEP_CASCADE_POSITION_KP_NUM * error) / 10L +
+          g_step_status.integral / STEP_CASCADE_POSITION_KI_DIV);
+    if (target_velocity_x10 > STEP_CASCADE_TARGET_VELOCITY_X10_MAX)
+        target_velocity_x10 = STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
+    else if (target_velocity_x10 <
+             -STEP_CASCADE_TARGET_VELOCITY_X10_MAX)
+        target_velocity_x10 = -STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
+
+    /* Positive speed error requires a positive corrective rail output. */
+    speed_error_x10 =
+        (int32_t)velocity_pixels_per_frame * 10L - target_velocity_x10;
+    speed_derivative_x10 =
+        speed_error_x10 - g_previous_speed_error_x10;
+    g_previous_speed_error_x10 = (int16_t)speed_error_x10;
+
+    g_speed_integral_x10 += speed_error_x10;
+    if (g_speed_integral_x10 > STEP_CASCADE_SPEED_INTEGRAL_MAX)
+        g_speed_integral_x10 = STEP_CASCADE_SPEED_INTEGRAL_MAX;
+    else if (g_speed_integral_x10 < -STEP_CASCADE_SPEED_INTEGRAL_MAX)
+        g_speed_integral_x10 = -STEP_CASCADE_SPEED_INTEGRAL_MAX;
+
+    output_tenths =
+        (STEP_CASCADE_SPEED_KP_NUM * speed_error_x10 +
+         STEP_CASCADE_SPEED_KI_NUM * g_speed_integral_x10 +
+         STEP_CASCADE_SPEED_KD_NUM * speed_derivative_x10) /
+        STEP_CASCADE_SPEED_GAIN_DEN;
+    if (output_tenths > STEP_CASCADE_OUTPUT_MAX_TENTHS)
+        output_tenths = STEP_CASCADE_OUTPUT_MAX_TENTHS;
+    else if (output_tenths < -STEP_CASCADE_OUTPUT_MAX_TENTHS)
+        output_tenths = -STEP_CASCADE_OUTPUT_MAX_TENTHS;
+    return output_tenths + g_feedforward_tenths;
+}
 
 static void StepControl_SendPosition(int32_t target_tenth_degree)
 {
@@ -155,6 +247,8 @@ void StepControl_Init(void)
     g_previous_error = 0;
     g_filtered_error = 0;
     g_filtered_derivative = 0;
+    g_speed_integral_x10 = 0;
+    g_previous_speed_error_x10 = 0;
     g_target_offset_pixels = 0;
     g_output_tenths = 0;
     g_feedforward_tenths = 0;
@@ -168,7 +262,12 @@ void StepControl_Init(void)
     g_target_position_valid = false;
     g_loss_stop_sent = false;
     g_open_loop_active = false;
-    g_velocity_profile_enabled = false;
+    /*
+     * Use the proven velocity/position capture curve in every closed-loop
+     * mode (BALANCE, AB and ABCDA). Open-loop transfer commands bypass this
+     * path, so the two fast BALANCE travel stages remain unchanged.
+     */
+    g_velocity_profile_enabled = true;
 }
 
 void StepControl_Enter(void)
@@ -193,6 +292,8 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_previous_error = 0;
     g_filtered_error = 0;
     g_filtered_derivative = 0;
+    g_speed_integral_x10 = 0;
+    g_previous_speed_error_x10 = 0;
     g_output_tenths = 0;
     g_filter_valid = false;
 }
@@ -407,7 +508,10 @@ void StepControl_Update10ms(void)
              * several frames keeps moving the rail after the ball is already
              * centered and produces visible small-amplitude jitter.
              */
-            if (error == 0)
+            if ((error == 0) &&
+                ((STEP_CONTROL_USE_CASCADE == 0) ||
+                 ((derivative <= STEP_CONTROL_STICTION_DERIVATIVE_MAX) &&
+                  (derivative >= -STEP_CONTROL_STICTION_DERIVATIVE_MAX))))
             {
                 g_filtered_derivative = 0;
                 derivative = 0;
@@ -462,6 +566,9 @@ void StepControl_Update10ms(void)
                         STEP_PROFILE_MAX_LIMIT_TENTHS;
                 }
             }
+#if STEP_CONTROL_USE_CASCADE
+            output = StepControl_CalculateCascade(error, derivative);
+#else
             if (error == 0)
             {
                 /*
@@ -539,6 +646,7 @@ void StepControl_Update10ms(void)
                      derivative_gain_num * derivative;
             output /= (STEP_PID_GAIN_DEN / 10);
             output += g_feedforward_tenths;
+#endif
 
             /*
              * Overcome static friction only when the ball is nearly stopped
@@ -587,6 +695,8 @@ void StepControl_Update10ms(void)
         g_step_status.integral = 0;
         g_previous_error = 0;
         g_filtered_derivative = 0;
+        g_speed_integral_x10 = 0;
+        g_previous_speed_error_x10 = 0;
         g_output_tenths = 0;
         g_filter_valid = false;
         g_lost_target_ticks = STEP_CONTROL_LOST_HOLD_TICKS;

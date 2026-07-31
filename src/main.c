@@ -60,9 +60,12 @@ __asm(".global __ARM_use_no_argv\n");
 #define AB_STOP_STABLE_TICKS        (10U)
 #define AB_STOP_TIMEOUT_TICKS       (150U)
 #define AB_FEEDFORWARD_SIGN         (1L)
-#define AB_PWM_ACCEL_FF_NUM         (1L)
-#define AB_ENCODER_ACCEL_FF_NUM     (2L)
-#define AB_FEEDFORWARD_LIMIT_TENTHS (60)
+#define AB_PWM_ACCEL_FF_ACCEL_NUM   (2L)
+#define AB_PWM_ACCEL_FF_BRAKE_NUM   (3L)
+#define AB_ENCODER_ACCEL_FF_NUM     (3L)
+#define AB_ENCODER_ACCEL_DEAD_ZONE  (1)
+#define AB_FEEDFORWARD_LIMIT_TENTHS (90)
+#define AB_FEEDFORWARD_SLEW_TENTHS  (8)
 
 enum CAR_STATE
 {
@@ -104,7 +107,9 @@ static uint16_t g_ab_stop_ticks;
 static bool g_ab_stopped;
 static int16_t g_ab_previous_average_pwm;
 static int16_t g_ab_previous_average_rpm;
+static int16_t g_ab_filtered_pwm_accel;
 static int16_t g_ab_filtered_encoder_accel;
+static int16_t g_ab_feedforward_tenths;
 
 static void Key_Init(void);
 static void Key_Update10ms(void);
@@ -404,7 +409,9 @@ static void State_Update(void)
             g_ab_stop_ticks = 0U;
             g_ab_previous_average_pwm = 0;
             g_ab_previous_average_rpm = 0;
+            g_ab_filtered_pwm_accel = 0;
             g_ab_filtered_encoder_accel = 0;
+            g_ab_feedforward_tenths = 0;
             Encoder_Clear();
             LineFollow_ResetSoft();
             LineFollow_SetTargetBasePWM(AB_CRUISE_PWM);
@@ -531,7 +538,9 @@ static void State_Enter(enum CAR_STATE state)
             g_ab_stopped = false;
             g_ab_previous_average_pwm = 0;
             g_ab_previous_average_rpm = 0;
+            g_ab_filtered_pwm_accel = 0;
             g_ab_filtered_encoder_accel = 0;
+            g_ab_feedforward_tenths = 0;
             g_timer_running = false;
             Motor_Coast();
             LineFollow_ResetSoft();
@@ -690,7 +699,9 @@ static void State_Operation(void)
             int32_t average_rpm;
             int32_t pwm_accel;
             int32_t encoder_accel;
+            int32_t pwm_feedforward_gain;
             int32_t feedforward_tenths;
+            int32_t feedforward_delta;
             int16_t target_pwm;
 
             average_pwm =
@@ -701,11 +712,24 @@ static void State_Operation(void)
             encoder_accel = average_rpm - g_ab_previous_average_rpm;
             g_ab_previous_average_pwm = (int16_t)average_pwm;
             g_ab_previous_average_rpm = (int16_t)average_rpm;
+            g_ab_filtered_pwm_accel = (int16_t)(
+                (g_ab_filtered_pwm_accel + pwm_accel) / 2L);
             g_ab_filtered_encoder_accel = (int16_t)(
                 (3L * g_ab_filtered_encoder_accel + encoder_accel) / 4L);
 
+            if ((g_ab_filtered_encoder_accel <=
+                 AB_ENCODER_ACCEL_DEAD_ZONE) &&
+                (g_ab_filtered_encoder_accel >=
+                 -AB_ENCODER_ACCEL_DEAD_ZONE))
+            {
+                g_ab_filtered_encoder_accel = 0;
+            }
+            pwm_feedforward_gain =
+                (g_ab_filtered_pwm_accel < 0) ?
+                AB_PWM_ACCEL_FF_BRAKE_NUM :
+                AB_PWM_ACCEL_FF_ACCEL_NUM;
             feedforward_tenths = AB_FEEDFORWARD_SIGN *
-                (AB_PWM_ACCEL_FF_NUM * pwm_accel +
+                (pwm_feedforward_gain * g_ab_filtered_pwm_accel +
                  AB_ENCODER_ACCEL_FF_NUM *
                      g_ab_filtered_encoder_accel);
             if (feedforward_tenths > AB_FEEDFORWARD_LIMIT_TENTHS)
@@ -720,8 +744,20 @@ static void State_Operation(void)
             {
                 feedforward_tenths = 0;
             }
+            feedforward_delta =
+                feedforward_tenths - g_ab_feedforward_tenths;
+            if (feedforward_delta > AB_FEEDFORWARD_SLEW_TENTHS)
+            {
+                feedforward_delta = AB_FEEDFORWARD_SLEW_TENTHS;
+            }
+            else if (feedforward_delta < -AB_FEEDFORWARD_SLEW_TENTHS)
+            {
+                feedforward_delta = -AB_FEEDFORWARD_SLEW_TENTHS;
+            }
+            g_ab_feedforward_tenths = (int16_t)(
+                g_ab_feedforward_tenths + feedforward_delta);
             StepControl_SetFeedforwardTenths(
-                (int16_t)feedforward_tenths);
+                g_ab_feedforward_tenths);
             StepControl_Update10ms();
             if (g_ab_stopped)
             {
