@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define STEP_CONTROL_LEVEL_POSITION_TENTHS (908L)
+
 typedef struct
 {
     int16_t error;

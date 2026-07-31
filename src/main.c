@@ -39,7 +39,6 @@ __asm(".global __ARM_use_no_argv\n");
  * Swap the signs of the two tilt offsets if the first travel direction is
  * opposite to the required -5 cm direction.
  */
-#define BALANCE_LEVEL_POSITION_TENTHS (938L)
 #define BALANCE_FIRST_TILT_TENTHS     (-80L)
 #define BALANCE_FIRST_TIME_TICKS      (60U)
 #define BALANCE_SECOND_TILT_TENTHS    (100L)
@@ -174,7 +173,7 @@ static void Balance_TaskUpdate(void)
             g_balance_arrival_frames = 0U;
             g_balance_stage_start_ticks = g_timer_10ms_ticks;
             (void)StepControl_SetOpenLoopPositionTenths(
-                BALANCE_LEVEL_POSITION_TENTHS +
+                STEP_CONTROL_LEVEL_POSITION_TENTHS +
                 BALANCE_SECOND_TILT_TENTHS);
         }
     }
@@ -405,7 +404,7 @@ static void State_Update(void)
                 g_balance_last_frame = K230_Link_GetData()->frame_count;
                 g_balance_stage_start_ticks = 0U;
                 if (StepControl_SetOpenLoopPositionTenths(
-                        BALANCE_LEVEL_POSITION_TENTHS +
+                    STEP_CONTROL_LEVEL_POSITION_TENTHS +
                         BALANCE_FIRST_TILT_TENTHS))
                 {
                     g_timer_running = true;

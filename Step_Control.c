@@ -16,20 +16,19 @@
 #define STEP_CONTROL_POSITION_EPSILON (2)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
-#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (25)
-#define STEP_LEVEL_OFFSET_TENTH_DEG (611L)
+#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (24)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
 
 /*
- * Firm, strongly damped balance baseline for the ~23 FPS camera:
- * Kp=0.10, Ki=0.002, Kd=1.20.
- * Kp remains above the original soft baseline, while the stronger derivative
- * term and conservative position slew suppress oscillatory settling. A very
- * weak, center-only integral removes the remaining static position bias.
+ * Aggressive, strongly damped balance baseline for the ~23 FPS camera:
+ * Kp=0.16, Ki=0.003, Kd=1.50.
+ * The higher proportional gain provides a firmer restoring force, while the
+ * derivative term adds both initial response and braking near the target. The
+ * integral remains relatively weak and only removes static position bias.
  */
-#define STEP_PID_KP_NUM             (100)
-#define STEP_PID_KI_NUM             (2)
-#define STEP_PID_KD_NUM             (1200)
+#define STEP_PID_KP_NUM             (160)
+#define STEP_PID_KI_NUM             (3)
+#define STEP_PID_KD_NUM             (1500)
 #define STEP_PID_GAIN_DEN           (1000)
 
 static StepControl_Status g_step_status;
@@ -194,7 +193,7 @@ bool StepControl_SetOpenLoopOutputTenths(int16_t output_tenths)
 
     output_tenths = StepControl_Clamp(
         output_tenths, STEP_CONTROL_MAX_RPM * 10);
-    level_position = minimum_position + STEP_LEVEL_OFFSET_TENTH_DEG;
+    level_position = STEP_CONTROL_LEVEL_POSITION_TENTHS;
     if (level_position < minimum_position)
     {
         level_position = minimum_position;
@@ -471,9 +470,8 @@ void StepControl_Update10ms(void)
                 STEP_MOTOR_ADDRESS, &minimum_position,
                 &maximum_position))
         {
-            int32_t span = maximum_position - minimum_position;
             int32_t level_position =
-                minimum_position + STEP_LEVEL_OFFSET_TENTH_DEG;
+                STEP_CONTROL_LEVEL_POSITION_TENTHS;
             int32_t target;
 
             if (level_position < minimum_position)
