@@ -28,10 +28,15 @@ __asm(".global __ARM_use_no_argv\n");
 #define CAL_QUERY_TICKS             (2U)
 #define POSITION_REFRESH_TICKS      (2U)
 #define CAL_POSITION_SPAN           (1222L)
-#define BALANCE_NEGATIVE_TARGET_PIXELS (-145)
-#define BALANCE_POSITIVE_TARGET_PIXELS (140)
-#define BALANCE_ONE_CM_PIXELS       (32)
-#define BALANCE_SWITCH_LEAD_PIXELS  (120)
+/*
+ * Physical targets measured on the 800-pixel-wide CanMV display are
+ * converted to the 640-pixel detector/UART coordinate system:
+ * center 345 -> 276, point 1 200 -> 160, point 2 485 -> 388.
+ */
+#define BALANCE_NEGATIVE_TARGET_PIXELS (-116)
+#define BALANCE_POSITIVE_TARGET_PIXELS (112)
+#define BALANCE_ONE_CM_PIXELS       (26)
+#define BALANCE_SWITCH_LEAD_PIXELS  (96)
 #define BALANCE_ARRIVAL_FRAMES      (3U)
 /*
  * BALANCE open-loop transfer plus closed-loop endpoint holding.
