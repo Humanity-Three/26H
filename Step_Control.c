@@ -50,6 +50,7 @@ static int16_t g_filtered_error;
 static int16_t g_filtered_derivative;
 static int16_t g_target_offset_pixels;
 static int16_t g_output_tenths;
+static int16_t g_feedforward_tenths;
 static uint8_t g_lost_target_ticks;
 static uint32_t g_last_frame_count;
 static int32_t g_last_target_position;
@@ -156,6 +157,7 @@ void StepControl_Init(void)
     g_filtered_derivative = 0;
     g_target_offset_pixels = 0;
     g_output_tenths = 0;
+    g_feedforward_tenths = 0;
     g_lost_target_ticks = 0U;
     g_last_frame_count = 0U;
     g_last_target_position = 0;
@@ -198,6 +200,12 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
 void StepControl_EnableVelocityProfile(bool enable)
 {
     g_velocity_profile_enabled = enable;
+}
+
+void StepControl_SetFeedforwardTenths(int16_t output_tenths)
+{
+    g_feedforward_tenths = StepControl_Clamp(
+        output_tenths, STEP_CONTROL_MAX_RPM * 10);
 }
 
 bool StepControl_SetOpenLoopOutputTenths(int16_t output_tenths)
@@ -393,6 +401,18 @@ void StepControl_Update10ms(void)
                  3L * derivative) / 4L);
             derivative = g_filtered_derivative;
 
+            /*
+             * Once position is inside the dead zone, discard derivative
+             * history immediately. Letting filtered velocity decay over
+             * several frames keeps moving the rail after the ball is already
+             * centered and produces visible small-amplitude jitter.
+             */
+            if (error == 0)
+            {
+                g_filtered_derivative = 0;
+                derivative = 0;
+            }
+
             position_gain_num = STEP_PID_KP_NUM;
             derivative_gain_num = STEP_PID_KD_NUM;
             profile_output_limit_tenths = STEP_CONTROL_MAX_RPM * 10;
@@ -496,6 +516,7 @@ void StepControl_Update10ms(void)
                     (int32_t)STEP_PID_KI_NUM * candidate_integral +
                     derivative_gain_num * derivative;
                 unsaturated_output /= STEP_PID_GAIN_DEN;
+                unsaturated_output += g_feedforward_tenths / 10;
                 if (!((unsaturated_output >=
                        profile_output_limit_tenths / 10 &&
                        error > 0) ||
@@ -517,6 +538,7 @@ void StepControl_Update10ms(void)
                          g_step_status.integral +
                      derivative_gain_num * derivative;
             output /= (STEP_PID_GAIN_DEN / 10);
+            output += g_feedforward_tenths;
 
             /*
              * Overcome static friction only when the ball is nearly stopped

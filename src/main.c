@@ -59,6 +59,10 @@ __asm(".global __ARM_use_no_argv\n");
 #define AB_STOP_RPM                 (3)
 #define AB_STOP_STABLE_TICKS        (10U)
 #define AB_STOP_TIMEOUT_TICKS       (150U)
+#define AB_FEEDFORWARD_SIGN         (1L)
+#define AB_PWM_ACCEL_FF_NUM         (1L)
+#define AB_ENCODER_ACCEL_FF_NUM     (2L)
+#define AB_FEEDFORWARD_LIMIT_TENTHS (60)
 
 enum CAR_STATE
 {
@@ -98,6 +102,9 @@ static bool g_ab_stopping;
 static uint8_t g_ab_stop_stable_ticks;
 static uint16_t g_ab_stop_ticks;
 static bool g_ab_stopped;
+static int16_t g_ab_previous_average_pwm;
+static int16_t g_ab_previous_average_rpm;
+static int16_t g_ab_filtered_encoder_accel;
 
 static void Key_Init(void);
 static void Key_Update10ms(void);
@@ -395,6 +402,9 @@ static void State_Update(void)
             g_ab_stopping = false;
             g_ab_stop_stable_ticks = 0U;
             g_ab_stop_ticks = 0U;
+            g_ab_previous_average_pwm = 0;
+            g_ab_previous_average_rpm = 0;
+            g_ab_filtered_encoder_accel = 0;
             Encoder_Clear();
             LineFollow_ResetSoft();
             LineFollow_SetTargetBasePWM(AB_CRUISE_PWM);
@@ -519,11 +529,15 @@ static void State_Enter(enum CAR_STATE state)
             g_ab_stop_stable_ticks = 0U;
             g_ab_stop_ticks = 0U;
             g_ab_stopped = false;
+            g_ab_previous_average_pwm = 0;
+            g_ab_previous_average_rpm = 0;
+            g_ab_filtered_encoder_accel = 0;
             g_timer_running = false;
             Motor_Coast();
             LineFollow_ResetSoft();
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
+            StepControl_SetFeedforwardTenths(0);
             break;
         case CAR_STATE_ABCDA_BALANCE_CENTER:
             StepControl_Enter();
@@ -563,6 +577,7 @@ static void State_Exit(enum CAR_STATE state)
             g_timer_running = false;
             Motor_Coast();
             LineFollow_ResetSoft();
+            StepControl_SetFeedforwardTenths(0);
             StepControl_Exit();
             break;
         case CAR_STATE_ABCDA_BALANCE_CENTER:
@@ -666,12 +681,47 @@ static void State_Operation(void)
         case CAR_STATE_AB_BALANCE:
         {
             Encoder_Status encoder = Encoder_GetStatus();
+            Motor_Status motor = Motor_GetStatus();
             int32_t left_count = encoder.left_count;
             int32_t right_count = encoder.right_count;
             int32_t travelled;
             int32_t remaining;
+            int32_t average_pwm;
+            int32_t average_rpm;
+            int32_t pwm_accel;
+            int32_t encoder_accel;
+            int32_t feedforward_tenths;
             int16_t target_pwm;
 
+            average_pwm =
+                ((int32_t)motor.left_pwm + motor.right_pwm) / 2L;
+            average_rpm =
+                ((int32_t)encoder.left_rpm + encoder.right_rpm) / 2L;
+            pwm_accel = average_pwm - g_ab_previous_average_pwm;
+            encoder_accel = average_rpm - g_ab_previous_average_rpm;
+            g_ab_previous_average_pwm = (int16_t)average_pwm;
+            g_ab_previous_average_rpm = (int16_t)average_rpm;
+            g_ab_filtered_encoder_accel = (int16_t)(
+                (3L * g_ab_filtered_encoder_accel + encoder_accel) / 4L);
+
+            feedforward_tenths = AB_FEEDFORWARD_SIGN *
+                (AB_PWM_ACCEL_FF_NUM * pwm_accel +
+                 AB_ENCODER_ACCEL_FF_NUM *
+                     g_ab_filtered_encoder_accel);
+            if (feedforward_tenths > AB_FEEDFORWARD_LIMIT_TENTHS)
+            {
+                feedforward_tenths = AB_FEEDFORWARD_LIMIT_TENTHS;
+            }
+            else if (feedforward_tenths < -AB_FEEDFORWARD_LIMIT_TENTHS)
+            {
+                feedforward_tenths = -AB_FEEDFORWARD_LIMIT_TENTHS;
+            }
+            if (!g_ab_started || g_ab_stopped)
+            {
+                feedforward_tenths = 0;
+            }
+            StepControl_SetFeedforwardTenths(
+                (int16_t)feedforward_tenths);
             StepControl_Update10ms();
             if (g_ab_stopped)
             {
@@ -729,6 +779,7 @@ static void State_Operation(void)
                 (g_ab_stop_ticks >= AB_STOP_TIMEOUT_TICKS))
             {
                 Motor_Coast();
+                StepControl_SetFeedforwardTenths(0);
                 g_timer_running = false;
                 g_ab_stopped = true;
             }
