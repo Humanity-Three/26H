@@ -38,10 +38,10 @@ __asm(".global __ARM_use_no_argv\n");
 #define BALANCE_NEGATIVE_TARGET_PIXELS (-114)
 #define BALANCE_POSITIVE_TARGET_PIXELS (114)
 /*
- * -5 cm is display x=243 (detector x=194, dx=-114). Two centimetres before
- * that point toward center is display x~=300 (detector x~=240, dx=-68).
+ * -5 cm is display x=243 (detector x=194, dx=-114). Reverse about one
+ * centimetre before it (23 detector pixels) so inertia completes the travel.
  */
-#define BALANCE_NEGATIVE_REVERSE_DX           (-68)
+#define BALANCE_NEGATIVE_REVERSE_DX           (-91)
 /* 5 cm corresponds to 114 pixels, so 1 cm is approximately 23 pixels. */
 #define BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS (23)
 #define BALANCE_FINAL_STILL_DELTA_PIXELS       (3)
@@ -252,6 +252,7 @@ static void Balance_TaskUpdate(void)
             StepControl_SetTargetOffsetPixels(
                 BALANCE_POSITIVE_TARGET_PIXELS);
             StepControl_EnableVelocityProfile(true);
+            StepControl_EnableEndpointHold(true);
         }
     }
     else
@@ -660,6 +661,7 @@ static void State_Enter(enum CAR_STATE state)
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
             StepControl_EnableCenterHold(false);
+            StepControl_EnableEndpointHold(false);
             break;
         default:
             break;
@@ -1368,36 +1370,5 @@ static void Display_Update10ms(void)
         OLED_ShowNum(48U, 40U, hundredths, 2U, OLED_6X8);
         OLED_UpdateArea(0U, 40U, 128U, 8U);
 
-        OLED_ClearArea(0U, 48U, 128U, 8U);
-        OLED_ShowString(0U, 48U, "IR:", OLED_6X8);
-        OLED_ShowChar(18U, 48U,
-            Grayscale_Sensor_IsValid() ? 'V' : '-', OLED_6X8);
-        OLED_ShowString(30U, 48U, "M:", OLED_6X8);
-        OLED_ShowHexNum(
-            42U, 48U, Grayscale_Sensor_GetMask(), 2U, OLED_6X8);
-        OLED_ShowString(60U, 48U, "B:", OLED_6X8);
-        OLED_ShowNum(72U, 48U,
-            Grayscale_Sensor_GetRxByteCount() % 10000U, 4U, OLED_6X8);
-        OLED_ShowString(102U, 48U, "F:", OLED_6X8);
-        OLED_ShowNum(114U, 48U,
-            Grayscale_Sensor_GetFrameCount() % 100U, 2U, OLED_6X8);
-        OLED_UpdateArea(0U, 48U, 128U, 8U);
-
-        {
-            uint8_t raw_index;
-            uint8_t recent_count = Grayscale_Sensor_GetRecentByteCount();
-            OLED_ClearArea(0U, 56U, 128U, 8U);
-            OLED_ShowString(0U, 56U, "RX", OLED_6X8);
-            for (raw_index = 0U; raw_index < 8U; raw_index++)
-            {
-                if (raw_index < recent_count)
-                {
-                    OLED_ShowHexNum((uint8_t)(12U + raw_index * 12U), 56U,
-                        Grayscale_Sensor_GetRecentByte(raw_index),
-                        2U, OLED_6X8);
-                }
-            }
-            OLED_UpdateArea(0U, 56U, 128U, 8U);
-        }
     }
 }
