@@ -28,6 +28,7 @@ const TIMER         = scripting.addModule("/ti/driverlib/TIMER", {}, false);
 const TIMER1        = TIMER.addInstance();
 const UART          = scripting.addModule("/ti/driverlib/UART", {}, false);
 const UART1         = UART.addInstance();
+const UART2         = UART.addInstance();
 const ProjectConfig = scripting.addModule("/ti/project_config/ProjectConfig");
 
 /**
@@ -221,6 +222,16 @@ UART1.enabledInterrupts        = ["RX"];
 UART1.peripheral.$assign       = "UART0";
 UART1.peripheral.txPin.$assign = "PA28";
 UART1.peripheral.rxPin.$assign = "PA31";
+
+/* Eight-channel infrared line sensor: module TX->PA9, module RX->PA8. */
+UART2.$name                    = "IR_UART";
+UART2.targetBaudRate           = 115200;
+UART2.enableFIFO               = true;
+UART2.rxFifoThreshold          = "DL_UART_RX_FIFO_LEVEL_ONE_ENTRY";
+UART2.enabledInterrupts        = ["RX"];
+UART2.peripheral.$assign       = "UART1";
+UART2.peripheral.txPin.$assign = "PA8";
+UART2.peripheral.rxPin.$assign = "PA9";
 
 SYSCTL.MCLKSource         = "HSCLK";
 SYSCTL.CANCLKSource       = "SYSPLLCLK1";

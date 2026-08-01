@@ -13,52 +13,40 @@
 #define STEP_CONTROL_ENDPOINT_DEAD_ZONE (2)
 #define STEP_CONTROL_MAX_RPM        (60)
 #define STEP_CONTROL_INTEGRAL_MAX   (2000)
-#define STEP_CONTROL_INTEGRAL_ZONE  (96)
-#define STEP_CONTROL_INTEGRAL_LEAK_DIVISOR (64L)
 #define STEP_CONTROL_LOST_HOLD_TICKS (8U)
 #define STEP_CONTROL_POSITION_EPSILON (2)
-#define STEP_CONTROL_TARGET_HOLD_RELEASE_PIXELS (8)
+#define STEP_CONTROL_TARGET_HOLD_RELEASE_PIXELS (5)
 #define STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX (1)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
 #define STEP_CONTROL_STICTION_RELEASE_DERIVATIVE (4)
-#define STEP_CONTROL_STICTION_MIN_TENTHS (20)
-#define STEP_CONTROL_STICTION_MAX_TENTHS (36)
+#define STEP_CONTROL_STICTION_MIN_TENTHS (30)
+#define STEP_CONTROL_STICTION_MAX_TENTHS (46)
 #define STEP_CONTROL_POSITIVE_TARGET_STICTION_MIN_TENTHS (60)
-#define STEP_CONTROL_POSITIVE_TARGET_STICTION_MAX_TENTHS (100)
+#define STEP_CONTROL_POSITIVE_TARGET_STICTION_MAX_TENTHS (90)
+#define STEP_CONTROL_POSITIVE_STICTION_OFF_PIXELS (8)
+#define STEP_CONTROL_POSITIVE_STICTION_FULL_PIXELS (20)
 #define STEP_CONTROL_STICTION_RAMP_TENTHS (2)
 #define STEP_CONTROL_STICTION_RELEASE_TENTHS (4)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
 
 /*
- * Transient-stability tuning baseline for the ~23 FPS camera:
- * Kp=0.13, Ki=0.002, Kd=2.20.
- * Keeping the derivative below its frequent saturation region avoids
- * bang-bang reversals. A weak integral removes residual static position bias
- * without materially changing the transient response.
- */
-#define STEP_PID_KP_NUM             (130)
-#define STEP_PID_KI_NUM             (2)
-#define STEP_PID_KD_NUM             (2200)
-#define STEP_PID_GAIN_DEN           (1000)
-
-/*
- * Experimental cascaded controller:
+ * Cascaded controller:
  * outer position PI -> target ball velocity,
  * inner velocity PID -> rail/motor output.
- * Set to 0 to restore the proven single-loop controller below.
  */
-#define STEP_CONTROL_USE_CASCADE    (1)
 #define STEP_CASCADE_POSITION_KP_NUM (12L)
 #define STEP_CASCADE_POSITION_KP_NEAR_NUM (2L)
 #define STEP_CASCADE_POSITION_KP_POSITIVE_APPROACH_NUM (20L)
 #define STEP_CASCADE_POSITION_KP_POSITIVE_NEAR_NUM (15L)
 #define STEP_CASCADE_POSITION_NEAR_PIXELS (18)
 #define STEP_CASCADE_POSITION_LEAD_FRAMES (2L)
+#define STEP_CASCADE_POSITIVE_APPROACH_LEAD_FRAMES (3L)
 #define STEP_CASCADE_POSITION_KI_DIV (120L)
 #define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
 #define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (100)
-#define STEP_CASCADE_NEGATIVE_APPROACH_VELOCITY_X10_MAX (25)
+#define STEP_CASCADE_NEGATIVE_APPROACH_VELOCITY_X10_MAX (18)
+#define STEP_CASCADE_POSITIVE_APPROACH_VELOCITY_X10_MAX (18)
 #define STEP_CASCADE_SPEED_KP_NUM   (110L)
 #define STEP_CASCADE_SPEED_KP_AWAY_NUM (220L)
 #define STEP_CASCADE_SPEED_KI_NUM   (0L)
@@ -68,9 +56,6 @@
 #define STEP_CASCADE_OUTPUT_MAX_TENTHS (360L)
 
 /* Global closed-loop velocity/position coupled capture profile. */
-#define STEP_PROFILE_KP_AWAY_NUM    (170)
-#define STEP_PROFILE_KD_BRAKE_NUM   (3300)
-#define STEP_PROFILE_BRAKE_ACCEL    (3L)
 #define STEP_PROFILE_NEAR_PIXELS    (20)
 #define STEP_PROFILE_MIDDLE_PIXELS  (48)
 #define STEP_PROFILE_FAR_PIXELS     (96)
@@ -86,7 +71,7 @@ static int16_t g_filtered_derivative;
 static int16_t g_target_offset_pixels;
 static int16_t g_output_tenths;
 static int16_t g_feedforward_tenths;
-static int32_t g_speed_integral_x10;
+static int32_t g_cascade_speed_integral_x10;
 static int16_t g_previous_speed_error_x10;
 static int16_t g_stiction_tenths;
 static int8_t g_stiction_direction;
@@ -103,14 +88,17 @@ static bool g_loss_stop_sent;
 static bool g_open_loop_active;
 static bool g_velocity_profile_enabled;
 static bool g_target_hold_active;
+static bool g_center_hold_enabled;
 static bool g_suppress_speed_derivative_once;
 static bool g_active;
+static int8_t g_last_nonzero_error_sign;
 
 static int32_t StepControl_ApplyStiction(
     int32_t output, int16_t error, int16_t velocity_pixels_per_frame)
 {
     int8_t requested_direction = 0;
     int16_t absolute_velocity = velocity_pixels_per_frame;
+    int16_t absolute_error;
     int16_t stiction_min_tenths = STEP_CONTROL_STICTION_MIN_TENTHS;
     int16_t stiction_max_tenths = STEP_CONTROL_STICTION_MAX_TENTHS;
 
@@ -119,10 +107,38 @@ static int32_t StepControl_ApplyStiction(
 
     if ((g_target_offset_pixels > 0) && (error < 0))
     {
-        stiction_min_tenths =
-            STEP_CONTROL_POSITIVE_TARGET_STICTION_MIN_TENTHS;
-        stiction_max_tenths =
-            STEP_CONTROL_POSITIVE_TARGET_STICTION_MAX_TENTHS;
+        absolute_error = (int16_t)-error;
+        if (absolute_error <= STEP_CONTROL_POSITIVE_STICTION_OFF_PIXELS)
+        {
+            g_stiction_tenths = 0;
+            g_stiction_direction = 0;
+            g_stiction_active = false;
+            return output;
+        }
+        if (absolute_error < STEP_CONTROL_POSITIVE_STICTION_FULL_PIXELS)
+        {
+            int32_t fade_pixels = absolute_error -
+                STEP_CONTROL_POSITIVE_STICTION_OFF_PIXELS;
+            int32_t fade_range = STEP_CONTROL_POSITIVE_STICTION_FULL_PIXELS -
+                STEP_CONTROL_POSITIVE_STICTION_OFF_PIXELS;
+            stiction_min_tenths = (int16_t)(
+                STEP_CONTROL_POSITIVE_TARGET_STICTION_MIN_TENTHS *
+                fade_pixels / fade_range);
+            stiction_max_tenths = (int16_t)(
+                STEP_CONTROL_POSITIVE_TARGET_STICTION_MAX_TENTHS *
+                fade_pixels / fade_range);
+        }
+        else
+        {
+            stiction_min_tenths =
+                STEP_CONTROL_POSITIVE_TARGET_STICTION_MIN_TENTHS;
+            stiction_max_tenths =
+                STEP_CONTROL_POSITIVE_TARGET_STICTION_MAX_TENTHS;
+        }
+        if (g_stiction_tenths > stiction_max_tenths)
+        {
+            g_stiction_tenths = stiction_max_tenths;
+        }
     }
 
     /*
@@ -211,11 +227,25 @@ static int32_t StepControl_CalculateCascade(
     int32_t target_velocity_x10;
     int32_t target_velocity_limit_x10;
     int32_t position_kp_num;
+    int32_t position_lead_frames;
     int32_t predicted_error;
     int32_t speed_error_x10;
     int32_t speed_derivative_x10;
     int32_t speed_kp_num;
     int32_t output_tenths;
+    int8_t error_sign;
+
+    if (error != 0)
+    {
+        error_sign = (error > 0) ? 1 : -1;
+        if ((g_last_nonzero_error_sign != 0) &&
+            (error_sign != g_last_nonzero_error_sign))
+        {
+            /* Discard old-direction bias immediately after target crossing. */
+            g_step_status.integral /= 4L;
+        }
+        g_last_nonzero_error_sign = error_sign;
+    }
 
     /*
      * Hold the learned position integral inside the dead zone. This mechanism
@@ -243,9 +273,14 @@ static int32_t StepControl_CalculateCascade(
      * the measured position itself crosses center. This preserves strong
      * far-field capture without relying on a very soft near-center gain.
      */
+    position_lead_frames = STEP_CASCADE_POSITION_LEAD_FRAMES;
+    if ((g_target_offset_pixels > 0) && (error < 0))
+    {
+        position_lead_frames =
+            STEP_CASCADE_POSITIVE_APPROACH_LEAD_FRAMES;
+    }
     predicted_error = (int32_t)error +
-        STEP_CASCADE_POSITION_LEAD_FRAMES *
-            velocity_pixels_per_frame;
+        position_lead_frames * velocity_pixels_per_frame;
 
     position_kp_num = STEP_CASCADE_POSITION_KP_NUM;
     if ((g_target_offset_pixels > 0) && (error < 0))
@@ -289,6 +324,12 @@ static int32_t StepControl_CalculateCascade(
         target_velocity_limit_x10 =
             STEP_CASCADE_NEGATIVE_APPROACH_VELOCITY_X10_MAX;
     }
+    else if ((g_target_offset_pixels > 0) && (error < 0))
+    {
+        /* Limit arrival energy at +5 while retaining bias compensation. */
+        target_velocity_limit_x10 =
+            STEP_CASCADE_POSITIVE_APPROACH_VELOCITY_X10_MAX;
+    }
     if (target_velocity_x10 > target_velocity_limit_x10)
         target_velocity_x10 = target_velocity_limit_x10;
     else if (target_velocity_x10 < -target_velocity_limit_x10)
@@ -315,15 +356,20 @@ static int32_t StepControl_CalculateCascade(
     {
         speed_kp_num = STEP_CASCADE_SPEED_KP_AWAY_NUM;
     }
-    g_speed_integral_x10 += speed_error_x10;
-    if (g_speed_integral_x10 > STEP_CASCADE_SPEED_INTEGRAL_MAX)
-        g_speed_integral_x10 = STEP_CASCADE_SPEED_INTEGRAL_MAX;
-    else if (g_speed_integral_x10 < -STEP_CASCADE_SPEED_INTEGRAL_MAX)
-        g_speed_integral_x10 = -STEP_CASCADE_SPEED_INTEGRAL_MAX;
+#if STEP_CASCADE_SPEED_KI_NUM != 0
+    g_cascade_speed_integral_x10 += speed_error_x10;
+    if (g_cascade_speed_integral_x10 > STEP_CASCADE_SPEED_INTEGRAL_MAX)
+        g_cascade_speed_integral_x10 = STEP_CASCADE_SPEED_INTEGRAL_MAX;
+    else if (g_cascade_speed_integral_x10 < -STEP_CASCADE_SPEED_INTEGRAL_MAX)
+        g_cascade_speed_integral_x10 = -STEP_CASCADE_SPEED_INTEGRAL_MAX;
+#else
+    /* Do not retain dormant history that could later enter the output. */
+    g_cascade_speed_integral_x10 = 0;
+#endif
 
     output_tenths =
          (speed_kp_num * speed_error_x10 +
-         STEP_CASCADE_SPEED_KI_NUM * g_speed_integral_x10 +
+         STEP_CASCADE_SPEED_KI_NUM * g_cascade_speed_integral_x10 +
          STEP_CASCADE_SPEED_KD_NUM * speed_derivative_x10) /
         STEP_CASCADE_SPEED_GAIN_DEN;
     if (output_tenths > STEP_CASCADE_OUTPUT_MAX_TENTHS)
@@ -427,7 +473,7 @@ void StepControl_Init(void)
     g_previous_error = 0;
     g_filtered_error = 0;
     g_filtered_derivative = 0;
-    g_speed_integral_x10 = 0;
+    g_cascade_speed_integral_x10 = 0;
     g_previous_speed_error_x10 = 0;
     g_stiction_tenths = 0;
     g_stiction_direction = 0;
@@ -446,7 +492,9 @@ void StepControl_Init(void)
     g_loss_stop_sent = false;
     g_open_loop_active = false;
     g_target_hold_active = false;
+    g_center_hold_enabled = false;
     g_suppress_speed_derivative_once = true;
+    g_last_nonzero_error_sign = 0;
     /*
      * Use the proven velocity/position capture curve in every closed-loop
      * mode (BALANCE, AB and ABCDA). Open-loop transfer commands bypass this
@@ -465,6 +513,8 @@ void StepControl_Enter(void)
 void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
 {
     g_open_loop_active = false;
+    /* Returning to closed loop must also restore its capture profile. */
+    g_velocity_profile_enabled = true;
     if (offset_pixels == g_target_offset_pixels)
     {
         return;
@@ -477,7 +527,7 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_previous_error = 0;
     g_filtered_error = 0;
     g_filtered_derivative = 0;
-    g_speed_integral_x10 = 0;
+    g_cascade_speed_integral_x10 = 0;
     g_previous_speed_error_x10 = 0;
     g_stiction_tenths = 0;
     g_stiction_direction = 0;
@@ -486,11 +536,21 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_filter_valid = false;
     g_target_hold_active = false;
     g_suppress_speed_derivative_once = true;
+    g_last_nonzero_error_sign = 0;
 }
 
 void StepControl_EnableVelocityProfile(bool enable)
 {
     g_velocity_profile_enabled = enable;
+}
+
+void StepControl_EnableCenterHold(bool enable)
+{
+    g_center_hold_enabled = enable;
+    if (!enable)
+    {
+        g_target_hold_active = false;
+    }
 }
 
 void StepControl_SetFeedforwardTenths(int16_t output_tenths)
@@ -600,11 +660,7 @@ void StepControl_Update10ms(void)
     int16_t error;
     int16_t derivative;
     int16_t control_dead_zone;
-    int32_t candidate_integral;
-    int32_t unsaturated_output;
     int32_t output;
-    int32_t position_gain_num;
-    int32_t derivative_gain_num;
     int16_t profile_output_limit_tenths;
     bool control_updated = false;
     bool first_filtered_sample = false;
@@ -703,9 +759,8 @@ void StepControl_Update10ms(void)
              * centered and produces visible small-amplitude jitter.
              */
             if ((error == 0) &&
-                ((STEP_CONTROL_USE_CASCADE == 0) ||
-                 ((derivative <= STEP_CONTROL_STICTION_DERIVATIVE_MAX) &&
-                  (derivative >= -STEP_CONTROL_STICTION_DERIVATIVE_MAX))))
+                (derivative <= STEP_CONTROL_STICTION_DERIVATIVE_MAX) &&
+                (derivative >= -STEP_CONTROL_STICTION_DERIVATIVE_MAX))
             {
                 g_filtered_derivative = 0;
                 derivative = 0;
@@ -733,6 +788,17 @@ void StepControl_Update10ms(void)
                     g_suppress_speed_derivative_once = true;
                 }
             }
+            else if (g_center_hold_enabled &&
+                     (g_target_offset_pixels == 0) &&
+                     (error == 0) &&
+                     (derivative <=
+                      STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX) &&
+                     (derivative >=
+                      -STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX))
+            {
+                /* AB/ABCDA only: lock immediately after settling at center. */
+                g_target_hold_active = true;
+            }
             /*
              * Do not latch endpoint targets. BALANCE keeps running its
              * closed loop after the stopwatch has stopped; freezing the
@@ -756,33 +822,11 @@ void StepControl_Update10ms(void)
                 return;
             }
 
-            position_gain_num = STEP_PID_KP_NUM;
-            derivative_gain_num = STEP_PID_KD_NUM;
             profile_output_limit_tenths = STEP_CONTROL_MAX_RPM * 10;
             if (g_velocity_profile_enabled)
             {
                 int32_t absolute_error =
                     (error < 0) ? -(int32_t)error : (int32_t)error;
-                int32_t absolute_velocity =
-                    (derivative < 0) ?
-                    -(int32_t)derivative : (int32_t)derivative;
-                int32_t stopping_distance =
-                    (absolute_velocity * absolute_velocity) /
-                    (2L * STEP_PROFILE_BRAKE_ACCEL);
-
-                if (((error > 0) && (derivative > 0)) ||
-                    ((error < 0) && (derivative < 0)))
-                {
-                    /* The ball is moving away: apply a firmer recovery pull. */
-                    position_gain_num = STEP_PROFILE_KP_AWAY_NUM;
-                }
-                else if ((((error > 0) && (derivative < 0)) ||
-                          ((error < 0) && (derivative > 0))) &&
-                         (stopping_distance >= absolute_error))
-                {
-                    /* Approaching too fast: brake before crossing the target. */
-                    derivative_gain_num = STEP_PROFILE_KD_BRAKE_NUM;
-                }
 
                 if (absolute_error <= STEP_PROFILE_NEAR_PIXELS)
                 {
@@ -804,89 +848,8 @@ void StepControl_Update10ms(void)
                     profile_output_limit_tenths =
                         STEP_PROFILE_MAX_LIMIT_TENTHS;
                 }
-
             }
-#if STEP_CONTROL_USE_CASCADE
             output = StepControl_CalculateCascade(error, derivative);
-#else
-            if (error == 0)
-            {
-                /*
-                 * Slowly release the learned tilt while the ball is inside
-                 * the dead zone. This lets the rail approach mechanical level
-                 * instead of permanently holding a friction-supported ball at
-                 * an old integral tilt. Any renewed drift rebuilds the needed
-                 * correction after the error leaves the dead zone.
-                 */
-                if (g_step_status.integral > 0)
-                {
-                    g_step_status.integral -=
-                        (g_step_status.integral +
-                         STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
-                        STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
-                }
-                else if (g_step_status.integral < 0)
-                {
-                    g_step_status.integral +=
-                        (-g_step_status.integral +
-                         STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
-                        STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
-                }
-            }
-            else if ((error <= STEP_CONTROL_INTEGRAL_ZONE) &&
-                     (error >= -STEP_CONTROL_INTEGRAL_ZONE))
-            {
-                /*
-                 * If the ball crosses the center, unload the old correction
-                 * quickly instead of letting it push the ball through again.
-                 */
-                if (((error > 0) && (g_step_status.integral < 0)) ||
-                    ((error < 0) && (g_step_status.integral > 0)))
-                {
-                    g_step_status.integral =
-                        g_step_status.integral * 3L / 4L;
-                }
-                candidate_integral =
-                    g_step_status.integral + error;
-                if (candidate_integral > STEP_CONTROL_INTEGRAL_MAX)
-                {
-                    candidate_integral = STEP_CONTROL_INTEGRAL_MAX;
-                }
-                else if (candidate_integral <
-                         -STEP_CONTROL_INTEGRAL_MAX)
-                {
-                    candidate_integral = -STEP_CONTROL_INTEGRAL_MAX;
-                }
-
-                unsaturated_output =
-                    position_gain_num * error +
-                    (int32_t)STEP_PID_KI_NUM * candidate_integral +
-                    derivative_gain_num * derivative;
-                unsaturated_output /= STEP_PID_GAIN_DEN;
-                unsaturated_output += g_feedforward_tenths / 10;
-                if (!((unsaturated_output >=
-                       profile_output_limit_tenths / 10 &&
-                       error > 0) ||
-                      (unsaturated_output <=
-                       -profile_output_limit_tenths / 10 &&
-                       error < 0)))
-                {
-                    g_step_status.integral = candidate_integral;
-                }
-            }
-
-            /*
-             * Keep one decimal place of controller output. With integer-only
-             * output, a one-count PID change moved the motor target by about
-             * one degree, producing visibly stepped motion.
-             */
-            output = position_gain_num * error +
-                     (int32_t)STEP_PID_KI_NUM *
-                         g_step_status.integral +
-                     derivative_gain_num * derivative;
-            output /= (STEP_PID_GAIN_DEN / 10);
-            output += g_feedforward_tenths;
-#endif
 
             output = StepControl_ApplyStiction(
                 output, error, derivative);
@@ -918,13 +881,14 @@ void StepControl_Update10ms(void)
         g_step_status.integral = 0;
         g_previous_error = 0;
         g_filtered_derivative = 0;
-        g_speed_integral_x10 = 0;
+        g_cascade_speed_integral_x10 = 0;
         g_previous_speed_error_x10 = 0;
         g_stiction_tenths = 0;
         g_stiction_direction = 0;
         g_stiction_active = false;
         g_target_hold_active = false;
         g_suppress_speed_derivative_once = true;
+        g_last_nonzero_error_sign = 0;
         g_output_tenths = 0;
         g_filter_valid = false;
         g_lost_target_ticks = STEP_CONTROL_LOST_HOLD_TICKS;

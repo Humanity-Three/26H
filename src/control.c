@@ -2,6 +2,8 @@
 #include "grayscale_sensor.h"
 #include "ti_msp_dl_config.h"
 
+#define LINE_CROSS_CONFIRM_TICKS (3U)
+
 static LineFollow_Config g_line_config = {
     /* 与已在当前硬件验证的 25E 工程保持一致。 */
     .base_pwm = 960,
@@ -21,6 +23,7 @@ static int16_t g_line_deceleration_slew = 10;
 static int16_t g_line_current_turn_pwm;
 static int16_t g_line_turn_slew = 600;
 static bool g_line_acceleration_half_step;
+static uint8_t g_line_cross_confirm_ticks;
 
 static int16_t LineFollow_Clamp(int32_t value, int16_t limit)
 {
@@ -57,6 +60,7 @@ void LineFollow_Reset(void)
     g_line_status.turn_pwm = 0;
     g_line_status.line_lost = true;
     g_line_status.cross_line = false;
+    g_line_cross_confirm_ticks = 0U;
 }
 
 void LineFollow_ResetSoft(void)
@@ -127,6 +131,7 @@ void LineFollow_Update10ms(void)
     int16_t turn;
     int16_t turn_limit;
     uint8_t count = 0U;
+    uint8_t middle_black_count = 0U;
     uint8_t mask = 0U;
     uint8_t i;
 
@@ -142,12 +147,29 @@ void LineFollow_Update10ms(void)
             mask |= (uint8_t)(1U << i);
             weighted_sum = (int16_t)(weighted_sum + weight[i]);
             count++;
+            if ((i >= 1U) && (i <= 6U))
+            {
+                middle_black_count++;
+            }
         }
     }
 
     g_line_status.sensor_mask = mask;
     g_line_status.black_count = count;
-    g_line_status.cross_line = (count >= 6U);
+    /* Require x2..x7 all black for three consecutive 10 ms updates. */
+    if (middle_black_count == 6U)
+    {
+        if (g_line_cross_confirm_ticks < LINE_CROSS_CONFIRM_TICKS)
+        {
+            g_line_cross_confirm_ticks++;
+        }
+    }
+    else
+    {
+        g_line_cross_confirm_ticks = 0U;
+    }
+    g_line_status.cross_line =
+        (g_line_cross_confirm_ticks >= LINE_CROSS_CONFIRM_TICKS);
 
     if (count == 0U)
     {

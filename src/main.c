@@ -58,8 +58,6 @@ __asm(".global __ARM_use_no_argv\n");
 #define BALANCE_FIRST_TIME_TICKS      (60U)
 #define BALANCE_SECOND_TILT_TENTHS    (200L)
 #define BALANCE_SECOND_TIME_TICKS     (120U)
-#define CIRCLE_RIGHT5_MASK          (0xF8U)
-#define CIRCLE_RIGHT3_MASK          (0xE0U)
 #define CIRCLE_DEPART_TICKS         (10U)
 #define CIRCLE_FINISH_TICKS         (1U)
 #define AB_CRUISE_PWM               (960)
@@ -85,20 +83,22 @@ __asm(".global __ARM_use_no_argv\n");
 #define AB_STOP_RPM                 (3)
 #define AB_STOP_STABLE_TICKS        (10U)
 #define AB_STOP_TIMEOUT_TICKS       (150U)
-#define AB_FEEDFORWARD_SIGN         (1L)
+#define AB_FEEDFORWARD_SIGN         (-1L)
 #define AB_PWM_ACCEL_FF_ACCEL_NUM   (7L)
 #define AB_PWM_ACCEL_FF_BRAKE_NUM   (11L)
 #define AB_ENCODER_ACCEL_FF_NUM     (11L)
+#define AB_ACCEL_FF_GAIN_DEN        (4L)
 #define AB_ENCODER_ACCEL_DEAD_ZONE  (1)
-#define AB_FEEDFORWARD_LIMIT_TENTHS (220)
-#define AB_FEEDFORWARD_SLEW_TENTHS  (4)
+#define AB_DRIVE_FF_LIMIT_TENTHS    (70L)
+#define AB_FEEDFORWARD_LIMIT_TENTHS (70L)
+#define AB_FEEDFORWARD_SLEW_TENTHS  (2L)
 #define ABCDA_GYRO_FF_SIGN           (1L)
 #define ABCDA_GYRO_FF_DEADZONE_X10  (18L)
 #define ABCDA_GYRO_FF_GAIN_NUM       (4L)
 #define ABCDA_GYRO_FF_GAIN_DEN       (10L)
-#define ABCDA_GYRO_FF_LIMIT_TENTHS   (100L)
-#define ABCDA_FEEDFORWARD_LIMIT_TENTHS (300L)
-#define ABCDA_FEEDFORWARD_SLEW_TENTHS  (7L)
+#define ABCDA_GYRO_FF_LIMIT_TENTHS   (30L)
+#define ABCDA_FEEDFORWARD_LIMIT_TENTHS (90L)
+#define ABCDA_FEEDFORWARD_SLEW_TENTHS  (3L)
 
 enum CAR_STATE
 {
@@ -338,6 +338,7 @@ int main(void)
             Key_Update10ms();
             Encoder_Update10ms();
             K230_Link_Update10ms();
+            Grayscale_Sensor_Update10ms();
             ZDT_CAN_PollRx();
             InitialLimit_Update10ms();
             State_Update();
@@ -625,6 +626,7 @@ static void State_Enter(enum CAR_STATE state)
             LineFollow_ResetSoft();
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
+            StepControl_EnableCenterHold(false);
             StepControl_SetFeedforwardTenths(0);
             break;
         case CAR_STATE_ABCDA_BALANCE_CENTER:
@@ -647,6 +649,7 @@ static void State_Enter(enum CAR_STATE state)
             LineFollow_ResetSoft();
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
+            StepControl_EnableCenterHold(false);
             StepControl_SetFeedforwardTenths(0);
             break;
         case CAR_STATE_BALANCE:
@@ -656,6 +659,7 @@ static void State_Enter(enum CAR_STATE state)
             g_balance_previous_dx_valid = false;
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
+            StepControl_EnableCenterHold(false);
             break;
         default:
             break;
@@ -715,43 +719,10 @@ static void State_Operation(void)
         {
             LineFollow_Status line_status;
             bool stop_line_detected;
-            uint8_t right_black_count;
-            uint8_t right_bits;
 
             LineFollow_Update10ms();
             line_status = LineFollow_GetStatus();
-            right_bits =
-                (uint8_t)(line_status.sensor_mask & CIRCLE_RIGHT5_MASK);
-            right_black_count = 0U;
-            if ((right_bits & 0x08U) != 0U)
-            {
-                right_black_count++;
-            }
-            if ((right_bits & 0x10U) != 0U)
-            {
-                right_black_count++;
-            }
-            if ((right_bits & 0x20U) != 0U)
-            {
-                right_black_count++;
-            }
-            if ((right_bits & 0x40U) != 0U)
-            {
-                right_black_count++;
-            }
-            if ((right_bits & 0x80U) != 0U)
-            {
-                right_black_count++;
-            }
-            /*
-             * Stop for four of the five right-side channels, all three
-             * rightmost channels, or at least five sensors overall.
-             */
-            stop_line_detected =
-                (right_black_count >= 4U) ||
-                ((line_status.sensor_mask & CIRCLE_RIGHT3_MASK) ==
-                 CIRCLE_RIGHT3_MASK) ||
-                (line_status.black_count >= 5U);
+            stop_line_detected = line_status.cross_line;
 
             if (!g_circle_departed)
             {
@@ -804,6 +775,7 @@ static void State_Operation(void)
             int32_t pwm_accel;
             int32_t encoder_accel;
             int32_t pwm_feedforward_gain;
+            int32_t drive_feedforward_tenths;
             int32_t feedforward_tenths;
             int32_t gyro_z_x10;
             int32_t gyro_feedforward_tenths;
@@ -811,8 +783,6 @@ static void State_Operation(void)
             int16_t target_pwm;
             LineFollow_Status line_status;
             bool stop_line_detected;
-            uint8_t right_black_count;
-            uint8_t right_bits;
             int16_t absolute_line_error;
 
             average_pwm =
@@ -839,10 +809,21 @@ static void State_Operation(void)
                 (g_ab_filtered_pwm_accel < 0) ?
                 AB_PWM_ACCEL_FF_BRAKE_NUM :
                 AB_PWM_ACCEL_FF_ACCEL_NUM;
-            feedforward_tenths = AB_FEEDFORWARD_SIGN *
+            drive_feedforward_tenths = AB_FEEDFORWARD_SIGN *
                 (pwm_feedforward_gain * g_ab_filtered_pwm_accel +
                  AB_ENCODER_ACCEL_FF_NUM *
-                     g_ab_filtered_encoder_accel);
+                     g_ab_filtered_encoder_accel) /
+                AB_ACCEL_FF_GAIN_DEN;
+            if (drive_feedforward_tenths > AB_DRIVE_FF_LIMIT_TENTHS)
+            {
+                drive_feedforward_tenths = AB_DRIVE_FF_LIMIT_TENTHS;
+            }
+            else if (drive_feedforward_tenths <
+                     -AB_DRIVE_FF_LIMIT_TENTHS)
+            {
+                drive_feedforward_tenths = -AB_DRIVE_FF_LIMIT_TENTHS;
+            }
+            feedforward_tenths = drive_feedforward_tenths;
             gyro_feedforward_tenths = 0;
             if ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) &&
                 g_abcda_curve_active && g_mpu6050_ready &&
@@ -1059,19 +1040,7 @@ static void State_Operation(void)
                      CAR_STATE_ABCDA_BALANCE_CENTER)
             {
                 line_status = LineFollow_GetStatus();
-                right_bits = (uint8_t)(
-                    line_status.sensor_mask & CIRCLE_RIGHT5_MASK);
-                right_black_count = 0U;
-                if ((right_bits & 0x08U) != 0U) right_black_count++;
-                if ((right_bits & 0x10U) != 0U) right_black_count++;
-                if ((right_bits & 0x20U) != 0U) right_black_count++;
-                if ((right_bits & 0x40U) != 0U) right_black_count++;
-                if ((right_bits & 0x80U) != 0U) right_black_count++;
-                stop_line_detected =
-                    (right_black_count >= 4U) ||
-                    ((line_status.sensor_mask & CIRCLE_RIGHT3_MASK) ==
-                     CIRCLE_RIGHT3_MASK) ||
-                    (line_status.black_count >= 5U);
+                stop_line_detected = line_status.cross_line;
 
                 if (!g_circle_departed)
                 {
@@ -1398,5 +1367,37 @@ static void Display_Update10ms(void)
         OLED_ShowChar(42U, 40U, ':', OLED_6X8);
         OLED_ShowNum(48U, 40U, hundredths, 2U, OLED_6X8);
         OLED_UpdateArea(0U, 40U, 128U, 8U);
+
+        OLED_ClearArea(0U, 48U, 128U, 8U);
+        OLED_ShowString(0U, 48U, "IR:", OLED_6X8);
+        OLED_ShowChar(18U, 48U,
+            Grayscale_Sensor_IsValid() ? 'V' : '-', OLED_6X8);
+        OLED_ShowString(30U, 48U, "M:", OLED_6X8);
+        OLED_ShowHexNum(
+            42U, 48U, Grayscale_Sensor_GetMask(), 2U, OLED_6X8);
+        OLED_ShowString(60U, 48U, "B:", OLED_6X8);
+        OLED_ShowNum(72U, 48U,
+            Grayscale_Sensor_GetRxByteCount() % 10000U, 4U, OLED_6X8);
+        OLED_ShowString(102U, 48U, "F:", OLED_6X8);
+        OLED_ShowNum(114U, 48U,
+            Grayscale_Sensor_GetFrameCount() % 100U, 2U, OLED_6X8);
+        OLED_UpdateArea(0U, 48U, 128U, 8U);
+
+        {
+            uint8_t raw_index;
+            uint8_t recent_count = Grayscale_Sensor_GetRecentByteCount();
+            OLED_ClearArea(0U, 56U, 128U, 8U);
+            OLED_ShowString(0U, 56U, "RX", OLED_6X8);
+            for (raw_index = 0U; raw_index < 8U; raw_index++)
+            {
+                if (raw_index < recent_count)
+                {
+                    OLED_ShowHexNum((uint8_t)(12U + raw_index * 12U), 56U,
+                        Grayscale_Sensor_GetRecentByte(raw_index),
+                        2U, OLED_6X8);
+                }
+            }
+            OLED_UpdateArea(0U, 56U, 128U, 8U);
+        }
     }
 }

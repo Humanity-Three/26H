@@ -137,6 +137,22 @@ extern "C" {
 #define K230_UART_BAUD_RATE                                             (115200)
 #define K230_UART_IBRD_80_MHZ_115200_BAUD                                   (43)
 #define K230_UART_FBRD_80_MHZ_115200_BAUD                                   (26)
+/* Defines for IR_UART */
+#define IR_UART_INST                                                       UART1
+#define IR_UART_INST_FREQUENCY                                          80000000
+#define IR_UART_INST_IRQHandler                                 UART1_IRQHandler
+#define IR_UART_INST_INT_IRQN                                     UART1_INT_IRQn
+#define GPIO_IR_UART_RX_PORT                                               GPIOA
+#define GPIO_IR_UART_TX_PORT                                               GPIOA
+#define GPIO_IR_UART_RX_PIN                                        DL_GPIO_PIN_9
+#define GPIO_IR_UART_TX_PIN                                        DL_GPIO_PIN_8
+#define GPIO_IR_UART_IOMUX_RX                                    (IOMUX_PINCM20)
+#define GPIO_IR_UART_IOMUX_TX                                    (IOMUX_PINCM19)
+#define GPIO_IR_UART_IOMUX_RX_FUNC                     IOMUX_PINCM20_PF_UART1_RX
+#define GPIO_IR_UART_IOMUX_TX_FUNC                     IOMUX_PINCM19_PF_UART1_TX
+#define IR_UART_BAUD_RATE                                               (115200)
+#define IR_UART_IBRD_80_MHZ_115200_BAUD                                     (43)
+#define IR_UART_FBRD_80_MHZ_115200_BAUD                                     (26)
 
 
 
@@ -265,6 +281,7 @@ void SYSCFG_DL_MOTOR_PWM_init(void);
 void SYSCFG_DL_TIMER_0_init(void);
 void SYSCFG_DL_OLED_I2C_init(void);
 void SYSCFG_DL_K230_UART_init(void);
+void SYSCFG_DL_IR_UART_init(void);
 
 void SYSCFG_DL_MCAN0_init(void);
 

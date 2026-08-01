@@ -57,6 +57,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_init(void)
     SYSCFG_DL_TIMER_0_init();
     SYSCFG_DL_OLED_I2C_init();
     SYSCFG_DL_K230_UART_init();
+    SYSCFG_DL_IR_UART_init();
     SYSCFG_DL_MCAN0_init();
     SYSCFG_DL_SYSCTL_CLK_init();
     /* Ensure backup structures have no valid state */
@@ -99,6 +100,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerG_reset(TIMER_0_INST);
     DL_I2C_reset(OLED_I2C_INST);
     DL_UART_Main_reset(K230_UART_INST);
+    DL_UART_Main_reset(IR_UART_INST);
     DL_MCAN_reset(MCAN0_INST);
 
     DL_GPIO_enablePower(GPIOA);
@@ -107,6 +109,7 @@ SYSCONFIG_WEAK void SYSCFG_DL_initPower(void)
     DL_TimerG_enablePower(TIMER_0_INST);
     DL_I2C_enablePower(OLED_I2C_INST);
     DL_UART_Main_enablePower(K230_UART_INST);
+    DL_UART_Main_enablePower(IR_UART_INST);
     DL_MCAN_enablePower(MCAN0_INST);
     delay_cycles(POWER_STARTUP_DELAY);
 }
@@ -134,6 +137,10 @@ SYSCONFIG_WEAK void SYSCFG_DL_GPIO_init(void)
         GPIO_K230_UART_IOMUX_TX, GPIO_K230_UART_IOMUX_TX_FUNC);
     DL_GPIO_initPeripheralInputFunction(
         GPIO_K230_UART_IOMUX_RX, GPIO_K230_UART_IOMUX_RX_FUNC);
+    DL_GPIO_initPeripheralOutputFunction(
+        GPIO_IR_UART_IOMUX_TX, GPIO_IR_UART_IOMUX_TX_FUNC);
+    DL_GPIO_initPeripheralInputFunction(
+        GPIO_IR_UART_IOMUX_RX, GPIO_IR_UART_IOMUX_RX_FUNC);
 
     DL_GPIO_initDigitalOutput(BEEP_IO_BEEP_IOMUX);
 
@@ -433,6 +440,45 @@ SYSCONFIG_WEAK void SYSCFG_DL_K230_UART_init(void)
     DL_UART_Main_setTXFIFOThreshold(K230_UART_INST, DL_UART_TX_FIFO_LEVEL_1_2_EMPTY);
 
     DL_UART_Main_enable(K230_UART_INST);
+}
+static const DL_UART_Main_ClockConfig gIR_UARTClockConfig = {
+    .clockSel    = DL_UART_MAIN_CLOCK_BUSCLK,
+    .divideRatio = DL_UART_MAIN_CLOCK_DIVIDE_RATIO_1
+};
+
+static const DL_UART_Main_Config gIR_UARTConfig = {
+    .mode        = DL_UART_MAIN_MODE_NORMAL,
+    .direction   = DL_UART_MAIN_DIRECTION_TX_RX,
+    .flowControl = DL_UART_MAIN_FLOW_CONTROL_NONE,
+    .parity      = DL_UART_MAIN_PARITY_NONE,
+    .wordLength  = DL_UART_MAIN_WORD_LENGTH_8_BITS,
+    .stopBits    = DL_UART_MAIN_STOP_BITS_ONE
+};
+
+SYSCONFIG_WEAK void SYSCFG_DL_IR_UART_init(void)
+{
+    DL_UART_Main_setClockConfig(IR_UART_INST, (DL_UART_Main_ClockConfig *) &gIR_UARTClockConfig);
+
+    DL_UART_Main_init(IR_UART_INST, (DL_UART_Main_Config *) &gIR_UARTConfig);
+    /*
+     * Configure baud rate by setting oversampling and baud rate divisors.
+     *  Target baud rate: 115200
+     *  Actual baud rate: 115190.78
+     */
+    DL_UART_Main_setOversampling(IR_UART_INST, DL_UART_OVERSAMPLING_RATE_16X);
+    DL_UART_Main_setBaudRateDivisor(IR_UART_INST, IR_UART_IBRD_80_MHZ_115200_BAUD, IR_UART_FBRD_80_MHZ_115200_BAUD);
+
+
+    /* Configure Interrupts */
+    DL_UART_Main_enableInterrupt(IR_UART_INST,
+                                 DL_UART_MAIN_INTERRUPT_RX);
+
+    /* Configure FIFOs */
+    DL_UART_Main_enableFIFOs(IR_UART_INST);
+    DL_UART_Main_setRXFIFOThreshold(IR_UART_INST, DL_UART_RX_FIFO_LEVEL_ONE_ENTRY);
+    DL_UART_Main_setTXFIFOThreshold(IR_UART_INST, DL_UART_TX_FIFO_LEVEL_1_2_EMPTY);
+
+    DL_UART_Main_enable(IR_UART_INST);
 }
 
 static const DL_MCAN_ClockConfig gMCAN0ClockConf = {
