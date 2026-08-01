@@ -30,12 +30,13 @@ __asm(".global __ARM_use_no_argv\n");
 #define POSITION_REFRESH_TICKS      (2U)
 #define CAL_POSITION_SPAN           (1222L)
 /*
- * Physical targets measured on the 800-pixel-wide CanMV display are
- * converted to the 640-pixel detector/UART coordinate system:
- * center 345 -> 276, point 1 200 -> 160, point 2 485 -> 388.
+ * Physical targets measured on the 800x480 CanMV display are converted to
+ * the 640x480 detector/UART coordinate system. X scales by 640/800 while Y
+ * is unchanged: center (385,190) -> (308,190), -5 cm (243,190) ->
+ * (194,190), and +5 cm (527,190) -> (422,190).
  */
-#define BALANCE_NEGATIVE_TARGET_PIXELS (-116)
-#define BALANCE_POSITIVE_TARGET_PIXELS (112)
+#define BALANCE_NEGATIVE_TARGET_PIXELS (-114)
+#define BALANCE_POSITIVE_TARGET_PIXELS (114)
 #define BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS (16)
 #define BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS (8)
 #define BALANCE_FIRST_SWITCH_LEAD_PIXELS  (110)
@@ -48,7 +49,7 @@ __asm(".global __ARM_use_no_argv\n");
  * Swap the signs of the two tilt offsets if the first travel direction is
  * opposite to the required -5 cm direction.
  */
-#define BALANCE_FIRST_TILT_TENTHS     (-80L)
+#define BALANCE_FIRST_TILT_TENTHS     (-60L)
 #define BALANCE_FIRST_TIME_TICKS      (60U)
 #define BALANCE_SECOND_TILT_TENTHS    (90L)
 #define BALANCE_SECOND_TIME_TICKS     (120U)
@@ -207,7 +208,7 @@ static void Balance_TaskUpdate(void)
     {
         if ((target_error <=
              BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS) &&
-            (target_error >=
+             (target_error >=
              -BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS))
         {
             if (g_balance_arrival_frames <
@@ -438,7 +439,9 @@ static void State_Update(void)
 
     /*
      * KEY3 clears the timer except in a completed AB run. In BALANCE it also restarts the complete
-     * -5 cm to +5 cm task from the current, center-balanced condition.
+     * -5 cm to +5 cm task from the current, center-balanced condition. The
+     * first transfer starts directly in closed loop so the controller can
+     * regulate approach velocity before the ball reaches -5 cm.
      */
     if ((g_key_pressed_event & 0x04U) != 0U)
     {
@@ -492,20 +495,14 @@ static void State_Update(void)
             g_timer_running = false;
             if (g_current_state == CAR_STATE_BALANCE)
             {
-                g_balance_stage = 1U;
+                g_balance_stage = 2U;
                 g_balance_arrival_frames = 0U;
                 g_balance_last_frame = K230_Link_GetData()->frame_count;
                 g_balance_stage_start_ticks = 0U;
-                if (StepControl_SetOpenLoopPositionTenths(
-                    STEP_CONTROL_LEVEL_POSITION_TENTHS +
-                        BALANCE_FIRST_TILT_TENTHS))
-                {
-                    g_timer_running = true;
-                }
-                else
-                {
-                    g_balance_stage = 0U;
-                }
+                StepControl_SetTargetOffsetPixels(
+                    BALANCE_NEGATIVE_TARGET_PIXELS);
+                StepControl_EnableVelocityProfile(true);
+                g_timer_running = true;
             }
             else if ((g_current_state == CAR_STATE_MOVECIRCLE) &&
                      !g_circle_finish_requested)

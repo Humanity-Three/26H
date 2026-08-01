@@ -6,7 +6,7 @@
 
 #define STEP_MOTOR_ADDRESS          (1U)
 #define STEP_MOTOR_POSITION_RPM     (60.0f)
-#define STEP_MOTOR_POSITION_SLEW    (16L)
+#define STEP_MOTOR_POSITION_SLEW    (20L)
 #define STEP_MOTOR_POSITION_TICKS   (1U)
 #define STEP_CONTROL_DEAD_ZONE      (4)
 #define STEP_CONTROL_MAX_RPM        (60)
@@ -43,17 +43,20 @@
  * Set to 0 to restore the proven single-loop controller below.
  */
 #define STEP_CONTROL_USE_CASCADE    (1)
-#define STEP_CASCADE_POSITION_KP_NUM (8L)
-#define STEP_CASCADE_POSITION_KI_DIV (500L)
+#define STEP_CASCADE_POSITION_KP_NUM (12L)
+#define STEP_CASCADE_POSITION_KP_NEAR_NUM (2L)
+#define STEP_CASCADE_POSITION_NEAR_PIXELS (18)
+#define STEP_CASCADE_POSITION_LEAD_FRAMES (2L)
+#define STEP_CASCADE_POSITION_KI_DIV (120L)
 #define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
-#define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (80)
-#define STEP_CASCADE_SPEED_KP_NUM   (100L)
-#define STEP_CASCADE_SPEED_KP_AWAY_NUM (180L)
+#define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (100)
+#define STEP_CASCADE_SPEED_KP_NUM   (110L)
+#define STEP_CASCADE_SPEED_KP_AWAY_NUM (220L)
 #define STEP_CASCADE_SPEED_KI_NUM   (0L)
-#define STEP_CASCADE_SPEED_KD_NUM   (90L)
+#define STEP_CASCADE_SPEED_KD_NUM   (140L)
 #define STEP_CASCADE_SPEED_GAIN_DEN (100L)
 #define STEP_CASCADE_SPEED_INTEGRAL_MAX (2000L)
-#define STEP_CASCADE_OUTPUT_MAX_TENTHS (300L)
+#define STEP_CASCADE_OUTPUT_MAX_TENTHS (360L)
 
 /* Global closed-loop velocity/position coupled capture profile. */
 #define STEP_PROFILE_KP_AWAY_NUM    (170)
@@ -100,6 +103,20 @@ static int32_t StepControl_ApplyStiction(
 
     if (absolute_velocity < 0)
         absolute_velocity = (int16_t)-absolute_velocity;
+
+    /*
+     * Once the ball is inside the position dead zone, release the dynamic
+     * breakaway boost immediately. Letting it decay over several camera
+     * frames keeps pushing the single-ended lift through center and creates
+     * a small limit cycle. The learned position integral remains untouched.
+     */
+    if (error == 0)
+    {
+        g_stiction_tenths = 0;
+        g_stiction_direction = 0;
+        g_stiction_active = false;
+        return output;
+    }
 
     if (error != 0)
     {
@@ -168,32 +185,24 @@ static int32_t StepControl_CalculateCascade(
     int16_t error, int16_t velocity_pixels_per_frame)
 {
     int32_t target_velocity_x10;
+    int32_t position_kp_num;
+    int32_t predicted_error;
     int32_t speed_error_x10;
     int32_t speed_derivative_x10;
     int32_t speed_kp_num;
     int32_t output_tenths;
 
-    if (error == 0)
-    {
-        if (g_step_status.integral > 0)
-        {
-            g_step_status.integral -=
-                (g_step_status.integral +
-                 STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
-                STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
-        }
-        else if (g_step_status.integral < 0)
-        {
-            g_step_status.integral +=
-                (-g_step_status.integral +
-                 STEP_CONTROL_INTEGRAL_LEAK_DIVISOR - 1L) /
-                STEP_CONTROL_INTEGRAL_LEAK_DIVISOR;
-        }
-    }
-    else if ((error <= STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
-             (error >= -STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
-             (velocity_pixels_per_frame <= 2) &&
-             (velocity_pixels_per_frame >= -2))
+    /*
+     * Hold the learned position integral inside the dead zone. This mechanism
+     * has one hinged end and one motor-lifted end, so its true level position
+     * generally needs a persistent static offset. Leaking the integral at
+     * zero error repeatedly removed that offset and biased the limit cycle.
+     */
+    if ((error != 0) &&
+        (error <= STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
+              (error >= -STEP_CASCADE_POSITION_INTEGRAL_ZONE) &&
+              (velocity_pixels_per_frame <= 2) &&
+              (velocity_pixels_per_frame >= -2))
     {
         g_step_status.integral += error;
         if (g_step_status.integral > STEP_CONTROL_INTEGRAL_MAX)
@@ -202,9 +211,27 @@ static int32_t StepControl_CalculateCascade(
             g_step_status.integral = -STEP_CONTROL_INTEGRAL_MAX;
     }
 
+    /*
+     * Predict where the ball will be after the camera/actuator delay. When an
+     * approaching ball would cross center within the lead horizon, the
+     * predicted error changes sign and asks the velocity loop to brake before
+     * the measured position itself crosses center. This preserves strong
+     * far-field capture without relying on a very soft near-center gain.
+     */
+    predicted_error = (int32_t)error +
+        STEP_CASCADE_POSITION_LEAD_FRAMES *
+            velocity_pixels_per_frame;
+
+    position_kp_num = STEP_CASCADE_POSITION_KP_NUM;
+    if ((predicted_error <= STEP_CASCADE_POSITION_NEAR_PIXELS) &&
+        (predicted_error >= -STEP_CASCADE_POSITION_NEAR_PIXELS))
+    {
+        position_kp_num = STEP_CASCADE_POSITION_KP_NEAR_NUM;
+    }
+
     /* Positive position error requires a negative target ball velocity. */
     target_velocity_x10 =
-        -((STEP_CASCADE_POSITION_KP_NUM * error) / 10L +
+        -((position_kp_num * predicted_error) / 10L +
           g_step_status.integral / STEP_CASCADE_POSITION_KI_DIV);
     if (target_velocity_x10 > STEP_CASCADE_TARGET_VELOCITY_X10_MAX)
         target_velocity_x10 = STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
@@ -558,9 +585,9 @@ void StepControl_Update10ms(void)
                         g_filtered_error - STEP_CONTROL_ERROR_JUMP_MAX;
                 }
                 /*
-                 * Keep only 25% history and accept 75% of the newest camera
-                 * sample. The old 75% history filter added several camera
-                 * frames of phase lag and made the ball oscillate.
+                 * Accept 75% of the newest camera sample. The remaining 25%
+                 * history rejects enough coordinate jitter for the higher
+                 * cascade gains without adding several frames of phase lag.
                  */
                 g_filtered_error = (int16_t)(
                     ((int32_t)g_filtered_error + 3L * raw_error) / 4L);
