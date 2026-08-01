@@ -15,11 +15,13 @@
 #define STEP_CONTROL_INTEGRAL_LEAK_DIVISOR (64L)
 #define STEP_CONTROL_LOST_HOLD_TICKS (8U)
 #define STEP_CONTROL_POSITION_EPSILON (2)
+#define STEP_CONTROL_TARGET_HOLD_RELEASE_PIXELS (8)
+#define STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX (1)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
 #define STEP_CONTROL_STICTION_RELEASE_DERIVATIVE (4)
-#define STEP_CONTROL_STICTION_MIN_TENTHS (14)
-#define STEP_CONTROL_STICTION_MAX_TENTHS (26)
+#define STEP_CONTROL_STICTION_MIN_TENTHS (16)
+#define STEP_CONTROL_STICTION_MAX_TENTHS (30)
 #define STEP_CONTROL_STICTION_RAMP_TENTHS (2)
 #define STEP_CONTROL_STICTION_RELEASE_TENTHS (4)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
@@ -50,6 +52,7 @@
 #define STEP_CASCADE_POSITION_KI_DIV (120L)
 #define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
 #define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (100)
+#define STEP_CASCADE_NEGATIVE_APPROACH_VELOCITY_X10_MAX (50)
 #define STEP_CASCADE_SPEED_KP_NUM   (110L)
 #define STEP_CASCADE_SPEED_KP_AWAY_NUM (220L)
 #define STEP_CASCADE_SPEED_KI_NUM   (0L)
@@ -65,7 +68,7 @@
 #define STEP_PROFILE_NEAR_PIXELS    (20)
 #define STEP_PROFILE_MIDDLE_PIXELS  (48)
 #define STEP_PROFILE_FAR_PIXELS     (96)
-#define STEP_PROFILE_NEAR_LIMIT_TENTHS   (100)
+#define STEP_PROFILE_NEAR_LIMIT_TENTHS   (80)
 #define STEP_PROFILE_MIDDLE_LIMIT_TENTHS (180)
 #define STEP_PROFILE_FAR_LIMIT_TENTHS    (300)
 #define STEP_PROFILE_MAX_LIMIT_TENTHS    (450)
@@ -93,6 +96,7 @@ static bool g_target_position_valid;
 static bool g_loss_stop_sent;
 static bool g_open_loop_active;
 static bool g_velocity_profile_enabled;
+static bool g_target_hold_active;
 static bool g_active;
 
 static int32_t StepControl_ApplyStiction(
@@ -185,6 +189,7 @@ static int32_t StepControl_CalculateCascade(
     int16_t error, int16_t velocity_pixels_per_frame)
 {
     int32_t target_velocity_x10;
+    int32_t target_velocity_limit_x10;
     int32_t position_kp_num;
     int32_t predicted_error;
     int32_t speed_error_x10;
@@ -233,11 +238,22 @@ static int32_t StepControl_CalculateCascade(
     target_velocity_x10 =
         -((position_kp_num * predicted_error) / 10L +
           g_step_status.integral / STEP_CASCADE_POSITION_KI_DIV);
-    if (target_velocity_x10 > STEP_CASCADE_TARGET_VELOCITY_X10_MAX)
-        target_velocity_x10 = STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
-    else if (target_velocity_x10 <
-             -STEP_CASCADE_TARGET_VELOCITY_X10_MAX)
-        target_velocity_x10 = -STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
+    target_velocity_limit_x10 = STEP_CASCADE_TARGET_VELOCITY_X10_MAX;
+    if ((g_target_offset_pixels < 0) && (error > 0))
+    {
+        /*
+         * While approaching a negative endpoint from the center side, limit
+         * commanded ball speed directly instead of changing actuator gains.
+         * This reduces arrival energy without depending on motor polarity.
+         * Once the ball crosses the target, full recovery speed is restored.
+         */
+        target_velocity_limit_x10 =
+            STEP_CASCADE_NEGATIVE_APPROACH_VELOCITY_X10_MAX;
+    }
+    if (target_velocity_x10 > target_velocity_limit_x10)
+        target_velocity_x10 = target_velocity_limit_x10;
+    else if (target_velocity_x10 < -target_velocity_limit_x10)
+        target_velocity_x10 = -target_velocity_limit_x10;
 
     /* Positive speed error requires a positive corrective rail output. */
     speed_error_x10 =
@@ -379,6 +395,7 @@ void StepControl_Init(void)
     g_target_position_valid = false;
     g_loss_stop_sent = false;
     g_open_loop_active = false;
+    g_target_hold_active = false;
     /*
      * Use the proven velocity/position capture curve in every closed-loop
      * mode (BALANCE, AB and ABCDA). Open-loop transfer commands bypass this
@@ -416,6 +433,7 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_stiction_active = false;
     g_output_tenths = 0;
     g_filter_valid = false;
+    g_target_hold_active = false;
 }
 
 void StepControl_EnableVelocityProfile(bool enable)
@@ -637,6 +655,46 @@ void StepControl_Update10ms(void)
                 derivative = 0;
             }
 
+            /*
+             * Once any commanded target is reached at very low speed, freeze
+             * the current motor position. Hysteresis prevents camera jitter
+             * and rack backlash from restarting alternating corrections. No
+             * frame-count delay is required; a real displacement immediately
+             * outside the release band wakes the cascade controller.
+             */
+            if (g_target_hold_active)
+            {
+                if ((g_filtered_error >
+                     STEP_CONTROL_TARGET_HOLD_RELEASE_PIXELS) ||
+                    (g_filtered_error <
+                     -STEP_CONTROL_TARGET_HOLD_RELEASE_PIXELS))
+                {
+                    g_target_hold_active = false;
+                }
+            }
+            else if ((error == 0) &&
+                     (derivative <=
+                      STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX) &&
+                     (derivative >=
+                      -STEP_CONTROL_TARGET_HOLD_VELOCITY_MAX))
+            {
+                g_target_hold_active = true;
+            }
+
+            if (g_target_hold_active)
+            {
+                g_filtered_derivative = 0;
+                g_previous_error = error;
+                g_previous_speed_error_x10 = 0;
+                g_step_status.error = 0;
+                g_step_status.output_rpm = 0;
+                if (g_target_position_valid)
+                {
+                    StepControl_UpdateMotorPosition();
+                }
+                return;
+            }
+
             position_gain_num = STEP_PID_KP_NUM;
             derivative_gain_num = STEP_PID_KD_NUM;
             profile_output_limit_tenths = STEP_CONTROL_MAX_RPM * 10;
@@ -804,6 +862,7 @@ void StepControl_Update10ms(void)
         g_stiction_tenths = 0;
         g_stiction_direction = 0;
         g_stiction_active = false;
+        g_target_hold_active = false;
         g_output_tenths = 0;
         g_filter_valid = false;
         g_lost_target_ticks = STEP_CONTROL_LOST_HOLD_TICKS;
