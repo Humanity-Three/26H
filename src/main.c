@@ -37,11 +37,16 @@ __asm(".global __ARM_use_no_argv\n");
  */
 #define BALANCE_NEGATIVE_TARGET_PIXELS (-114)
 #define BALANCE_POSITIVE_TARGET_PIXELS (114)
-#define BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS (16)
-#define BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS (8)
+/*
+ * -5 cm is display x=243 (detector x=194, dx=-114). Two centimetres before
+ * that point toward center is display x~=300 (detector x~=240, dx=-68).
+ */
+#define BALANCE_NEGATIVE_REVERSE_DX           (-68)
+/* 5 cm corresponds to 114 pixels, so 1 cm is approximately 23 pixels. */
+#define BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS (23)
+#define BALANCE_FINAL_STILL_DELTA_PIXELS       (3)
 #define BALANCE_FIRST_SWITCH_LEAD_PIXELS  (110)
 #define BALANCE_SECOND_SWITCH_LEAD_PIXELS (120)
-#define BALANCE_FIRST_ARRIVAL_FRAMES (3U)
 #define BALANCE_FINAL_ARRIVAL_FRAMES (4U)
 /*
  * BALANCE open-loop transfer plus closed-loop endpoint holding.
@@ -51,7 +56,7 @@ __asm(".global __ARM_use_no_argv\n");
  */
 #define BALANCE_FIRST_TILT_TENTHS     (-60L)
 #define BALANCE_FIRST_TIME_TICKS      (60U)
-#define BALANCE_SECOND_TILT_TENTHS    (90L)
+#define BALANCE_SECOND_TILT_TENTHS    (200L)
 #define BALANCE_SECOND_TIME_TICKS     (120U)
 #define CIRCLE_RIGHT5_MASK          (0xF8U)
 #define CIRCLE_RIGHT3_MASK          (0xE0U)
@@ -65,11 +70,12 @@ __asm(".global __ARM_use_no_argv\n");
 #define ABCDA_CURVE_PWM             (540)
 #define ABCDA_ACCEL_SLEW            (3)
 #define ABCDA_DECEL_SLEW            (8)
+#define ABCDA_TURN_SLEW             (35)
 #define ABCDA_STOP_PWM_STEP         (2)
 #define ABCDA_CURVE_ENTER_ERROR     (2)
 #define ABCDA_CURVE_EXIT_ERROR      (1)
 #define ABCDA_FINISH_CREEP_PWM      (400)
-#define ABCDA_FINISH_CREEP_COUNTS   (2340L)
+#define ABCDA_FINISH_CREEP_COUNTS   (2200L)
 /* Calibrate this from A to B: average quadrature counts of both wheels. */
 #define AB_TARGET_ENCODER_COUNTS    (11180L)
 #define AB_DECEL_START_COUNTS       (6240L)
@@ -122,6 +128,8 @@ static uint8_t g_balance_stage;
 static uint8_t g_balance_arrival_frames;
 static uint32_t g_balance_last_frame;
 static uint32_t g_balance_stage_start_ticks;
+static int16_t g_balance_previous_dx;
+static bool g_balance_previous_dx_valid;
 static uint32_t g_timer_10ms_ticks;
 static bool g_timer_running;
 static uint8_t g_circle_depart_ticks;
@@ -169,6 +177,7 @@ static void Balance_TaskUpdate(void)
     const K230_LinkData *link = K230_Link_GetData();
     int16_t target;
     int16_t target_error;
+    int16_t frame_delta;
 
     if ((g_balance_stage == 0U) || (g_balance_stage >= 5U))
     {
@@ -181,6 +190,14 @@ static void Balance_TaskUpdate(void)
         return;
     }
     g_balance_last_frame = link->frame_count;
+
+    frame_delta = 0;
+    if (g_balance_previous_dx_valid)
+    {
+        frame_delta = (int16_t)(link->dx - g_balance_previous_dx);
+    }
+    g_balance_previous_dx = link->dx;
+    g_balance_previous_dx_valid = true;
 
     target = ((g_balance_stage == 1U) ||
               (g_balance_stage == 2U)) ?
@@ -206,24 +223,12 @@ static void Balance_TaskUpdate(void)
     }
     else if (g_balance_stage == 2U)
     {
-        if ((target_error <=
-             BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS) &&
-             (target_error >=
-             -BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS))
-        {
-            if (g_balance_arrival_frames <
-                BALANCE_FIRST_ARRIVAL_FRAMES)
-            {
-                g_balance_arrival_frames++;
-            }
-        }
-        else
-        {
-            g_balance_arrival_frames = 0U;
-        }
-
-        if (g_balance_arrival_frames >=
-            BALANCE_FIRST_ARRIVAL_FRAMES)
+        /*
+         * -5 cm is a pass-through reversal point, not a settling point.
+         * Reverse as soon as the ball enters the target window from center;
+         * do not wait for low velocity or additional camera frames.
+         */
+        if (link->dx <= BALANCE_NEGATIVE_REVERSE_DX)
         {
             g_balance_stage = 3U;
             g_balance_arrival_frames = 0U;
@@ -251,10 +256,13 @@ static void Balance_TaskUpdate(void)
     }
     else
     {
-        if ((target_error <=
+        if (g_balance_previous_dx_valid &&
+            (target_error <=
              BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS) &&
             (target_error >=
-             -BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS))
+             -BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS) &&
+            (frame_delta <= BALANCE_FINAL_STILL_DELTA_PIXELS) &&
+            (frame_delta >= -BALANCE_FINAL_STILL_DELTA_PIXELS))
         {
             if (g_balance_arrival_frames <
                 BALANCE_FINAL_ARRIVAL_FRAMES)
@@ -469,11 +477,13 @@ static void State_Update(void)
             {
                 LineFollow_SetBasePWMSlewX2(
                     AB_ACCEL_SLEW_X2, AB_DECEL_SLEW_X2);
+                LineFollow_SetTurnPWMSlew(600);
             }
             else
             {
                 LineFollow_SetBasePWMSlew(
                     ABCDA_ACCEL_SLEW, ABCDA_DECEL_SLEW);
+                LineFollow_SetTurnPWMSlew(ABCDA_TURN_SLEW);
             }
             LineFollow_SetTargetBasePWM(ABCDA_STRAIGHT_PWM);
             if (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)
@@ -499,6 +509,7 @@ static void State_Update(void)
                 g_balance_arrival_frames = 0U;
                 g_balance_last_frame = K230_Link_GetData()->frame_count;
                 g_balance_stage_start_ticks = 0U;
+                g_balance_previous_dx_valid = false;
                 StepControl_SetTargetOffsetPixels(
                     BALANCE_NEGATIVE_TARGET_PIXELS);
                 StepControl_EnableVelocityProfile(true);
@@ -594,6 +605,7 @@ static void State_Enter(enum CAR_STATE state)
             g_timer_10ms_ticks = 0U;
             g_timer_running = true;
             LineFollow_SetBasePWMSlew(10, 10);
+            LineFollow_SetTurnPWMSlew(600);
             LineFollow_Reset();
             Motor_Enable(true);
             break;
@@ -641,6 +653,7 @@ static void State_Enter(enum CAR_STATE state)
             g_balance_stage = 0U;
             g_balance_arrival_frames = 0U;
             g_balance_last_frame = K230_Link_GetData()->frame_count;
+            g_balance_previous_dx_valid = false;
             StepControl_Enter();
             StepControl_SetTargetOffsetPixels(0);
             break;

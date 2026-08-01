@@ -18,6 +18,8 @@ static int16_t g_line_current_base_pwm;
 static int16_t g_line_target_base_pwm;
 static int16_t g_line_acceleration_slew = 10;
 static int16_t g_line_deceleration_slew = 10;
+static int16_t g_line_current_turn_pwm;
+static int16_t g_line_turn_slew = 600;
 static bool g_line_acceleration_half_step;
 
 static int16_t LineFollow_Clamp(int32_t value, int16_t limit)
@@ -48,6 +50,7 @@ void LineFollow_Reset(void)
      */
     g_line_current_base_pwm = 640;
     g_line_target_base_pwm = g_line_config.base_pwm;
+    g_line_current_turn_pwm = 0;
     g_line_status.sensor_mask = 0U;
     g_line_status.black_count = 0U;
     g_line_status.error = 0;
@@ -95,6 +98,12 @@ void LineFollow_SetBasePWMSlewX2(
     g_line_deceleration_slew = (int16_t)(deceleration_slew_x2 / 2);
     g_line_acceleration_half_step =
         ((acceleration_slew_x2 & 1) != 0);
+}
+
+void LineFollow_SetTurnPWMSlew(int16_t turn_slew)
+{
+    if (turn_slew < 1) turn_slew = 1;
+    g_line_turn_slew = turn_slew;
 }
 
 void LineFollow_SetConfig(const LineFollow_Config *config)
@@ -205,17 +214,32 @@ void LineFollow_Update10ms(void)
     }
     turn = LineFollow_Clamp(pid_output, turn_limit);
 
+    if (turn > g_line_current_turn_pwm + g_line_turn_slew)
+    {
+        g_line_current_turn_pwm = (int16_t)(
+            g_line_current_turn_pwm + g_line_turn_slew);
+    }
+    else if (turn < g_line_current_turn_pwm - g_line_turn_slew)
+    {
+        g_line_current_turn_pwm = (int16_t)(
+            g_line_current_turn_pwm - g_line_turn_slew);
+    }
+    else
+    {
+        g_line_current_turn_pwm = turn;
+    }
+
     /*
      * 正误差表示黑线位于传感器右侧：左轮加速、右轮减速。
      * 实车方向若相反，交换此处的加减号即可。
      */
     Motor_SetPWM(
-        (int16_t)(g_line_current_base_pwm + turn),
-        (int16_t)(g_line_current_base_pwm - turn));
+        (int16_t)(g_line_current_base_pwm + g_line_current_turn_pwm),
+        (int16_t)(g_line_current_base_pwm - g_line_current_turn_pwm));
 
     g_line_last_error = error;
     g_line_status.error = error;
-    g_line_status.turn_pwm = turn;
+    g_line_status.turn_pwm = g_line_current_turn_pwm;
 }
 
 LineFollow_Status LineFollow_GetStatus(void)

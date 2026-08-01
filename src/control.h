@@ -37,6 +37,7 @@ void LineFollow_SetBasePWMSlew(
     int16_t acceleration_slew, int16_t deceleration_slew);
 void LineFollow_SetBasePWMSlewX2(
     int16_t acceleration_slew_x2, int16_t deceleration_slew_x2);
+void LineFollow_SetTurnPWMSlew(int16_t turn_slew);
 void LineFollow_SetConfig(const LineFollow_Config *config);
 void LineFollow_Update10ms(void);
 LineFollow_Status LineFollow_GetStatus(void);
