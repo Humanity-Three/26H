@@ -7,6 +7,7 @@
 #include "zdt_can_port.h"
 #include "K230_link.h"
 #include "Step_Control.h"
+#include "MPU6050.h"
 
 #if defined(__ARMCC_VERSION) && (__ARMCC_VERSION >= 6010050)
 __asm(".global __ARM_use_no_argv\n");
@@ -35,9 +36,12 @@ __asm(".global __ARM_use_no_argv\n");
  */
 #define BALANCE_NEGATIVE_TARGET_PIXELS (-116)
 #define BALANCE_POSITIVE_TARGET_PIXELS (112)
-#define BALANCE_ONE_CM_PIXELS       (26)
-#define BALANCE_SWITCH_LEAD_PIXELS  (96)
-#define BALANCE_ARRIVAL_FRAMES      (3U)
+#define BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS (16)
+#define BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS (8)
+#define BALANCE_FIRST_SWITCH_LEAD_PIXELS  (110)
+#define BALANCE_SECOND_SWITCH_LEAD_PIXELS (120)
+#define BALANCE_FIRST_ARRIVAL_FRAMES (3U)
+#define BALANCE_FINAL_ARRIVAL_FRAMES (4U)
 /*
  * BALANCE open-loop transfer plus closed-loop endpoint holding.
  * Position/tilt units are 0.1 motor degree; time units are 10 ms.
@@ -46,27 +50,48 @@ __asm(".global __ARM_use_no_argv\n");
  */
 #define BALANCE_FIRST_TILT_TENTHS     (-80L)
 #define BALANCE_FIRST_TIME_TICKS      (60U)
-#define BALANCE_SECOND_TILT_TENTHS    (100L)
+#define BALANCE_SECOND_TILT_TENTHS    (90L)
 #define BALANCE_SECOND_TIME_TICKS     (120U)
 #define CIRCLE_RIGHT5_MASK          (0xF8U)
 #define CIRCLE_RIGHT3_MASK          (0xE0U)
 #define CIRCLE_DEPART_TICKS         (10U)
 #define CIRCLE_FINISH_TICKS         (1U)
 #define AB_CRUISE_PWM               (960)
+#define AB_ACCEL_SLEW_X2            (7)
+#define AB_DECEL_SLEW_X2            (16)
+#define AB_STOP_PWM_STEP            (4)
+#define ABCDA_STRAIGHT_PWM          (800)
+#define ABCDA_CURVE_PWM             (540)
+#define ABCDA_ACCEL_SLEW            (3)
+#define ABCDA_DECEL_SLEW            (8)
+#define ABCDA_STOP_PWM_STEP         (2)
+#define ABCDA_CURVE_ENTER_ERROR     (2)
+#define ABCDA_CURVE_EXIT_ERROR      (1)
+#define ABCDA_FINISH_CREEP_PWM      (400)
+#define ABCDA_FINISH_CREEP_COUNTS   (2340L)
 /* Calibrate this from A to B: average quadrature counts of both wheels. */
-#define AB_TARGET_ENCODER_COUNTS    (13520L)
+#define AB_TARGET_ENCODER_COUNTS    (11180L)
+#define AB_DECEL_START_COUNTS       (6240L)
+#define AB_APPROACH_PWM             (320)
 #define AB_CONTINUOUS_TRACKING      (1)
 #define AB_BRAKE_ENCODER_COUNTS     (2000L)
 #define AB_STOP_RPM                 (3)
 #define AB_STOP_STABLE_TICKS        (10U)
 #define AB_STOP_TIMEOUT_TICKS       (150U)
 #define AB_FEEDFORWARD_SIGN         (1L)
-#define AB_PWM_ACCEL_FF_ACCEL_NUM   (4L)
-#define AB_PWM_ACCEL_FF_BRAKE_NUM   (5L)
-#define AB_ENCODER_ACCEL_FF_NUM     (5L)
+#define AB_PWM_ACCEL_FF_ACCEL_NUM   (7L)
+#define AB_PWM_ACCEL_FF_BRAKE_NUM   (11L)
+#define AB_ENCODER_ACCEL_FF_NUM     (11L)
 #define AB_ENCODER_ACCEL_DEAD_ZONE  (1)
-#define AB_FEEDFORWARD_LIMIT_TENTHS (130)
+#define AB_FEEDFORWARD_LIMIT_TENTHS (220)
 #define AB_FEEDFORWARD_SLEW_TENTHS  (4)
+#define ABCDA_GYRO_FF_SIGN           (1L)
+#define ABCDA_GYRO_FF_DEADZONE_X10  (18L)
+#define ABCDA_GYRO_FF_GAIN_NUM       (4L)
+#define ABCDA_GYRO_FF_GAIN_DEN       (10L)
+#define ABCDA_GYRO_FF_LIMIT_TENTHS   (100L)
+#define ABCDA_FEEDFORWARD_LIMIT_TENTHS (300L)
+#define ABCDA_FEEDFORWARD_SLEW_TENTHS  (7L)
 
 enum CAR_STATE
 {
@@ -85,6 +110,7 @@ static enum CAR_STATE g_next_state = CAR_STATE_IDLE;
 /* KEY1..KEY4 press events map to bit0..bit3. */
 static uint8_t g_key_pressed_event;
 static volatile uint8_t g_task_10ms_pending;
+volatile uint32_t g_sys_tick_10ms;
 static uint8_t g_oled_heartbeat;
 static int32_t g_calibration_ccw_position;
 static int32_t g_calibration_cw_position;
@@ -111,6 +137,12 @@ static int16_t g_ab_previous_average_rpm;
 static int16_t g_ab_filtered_pwm_accel;
 static int16_t g_ab_filtered_encoder_accel;
 static int16_t g_ab_feedforward_tenths;
+static int16_t g_abcda_filtered_gyro_z_x10;
+static bool g_mpu6050_ready;
+static bool g_abcda_curve_active;
+static bool g_abcda_finish_creep_active;
+static bool g_abcda_finish_creep_done;
+static int32_t g_abcda_finish_creep_start_count;
 
 static void Key_Init(void);
 static void Key_Update10ms(void);
@@ -159,7 +191,7 @@ static void Balance_TaskUpdate(void)
     {
         if ((link->dx <=
              (BALANCE_NEGATIVE_TARGET_PIXELS +
-              BALANCE_SWITCH_LEAD_PIXELS)) ||
+              BALANCE_FIRST_SWITCH_LEAD_PIXELS)) ||
             ((g_timer_10ms_ticks - g_balance_stage_start_ticks) >=
              BALANCE_FIRST_TIME_TICKS))
         {
@@ -173,10 +205,13 @@ static void Balance_TaskUpdate(void)
     }
     else if (g_balance_stage == 2U)
     {
-        if ((target_error <= BALANCE_ONE_CM_PIXELS) &&
-            (target_error >= -BALANCE_ONE_CM_PIXELS))
+        if ((target_error <=
+             BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS) &&
+            (target_error >=
+             -BALANCE_FIRST_ARRIVAL_TOLERANCE_PIXELS))
         {
-            if (g_balance_arrival_frames < BALANCE_ARRIVAL_FRAMES)
+            if (g_balance_arrival_frames <
+                BALANCE_FIRST_ARRIVAL_FRAMES)
             {
                 g_balance_arrival_frames++;
             }
@@ -186,7 +221,8 @@ static void Balance_TaskUpdate(void)
             g_balance_arrival_frames = 0U;
         }
 
-        if (g_balance_arrival_frames >= BALANCE_ARRIVAL_FRAMES)
+        if (g_balance_arrival_frames >=
+            BALANCE_FIRST_ARRIVAL_FRAMES)
         {
             g_balance_stage = 3U;
             g_balance_arrival_frames = 0U;
@@ -200,7 +236,7 @@ static void Balance_TaskUpdate(void)
     {
         if ((link->dx >=
              (BALANCE_POSITIVE_TARGET_PIXELS -
-              BALANCE_SWITCH_LEAD_PIXELS)) ||
+              BALANCE_SECOND_SWITCH_LEAD_PIXELS)) ||
             ((g_timer_10ms_ticks - g_balance_stage_start_ticks) >=
              BALANCE_SECOND_TIME_TICKS))
         {
@@ -214,10 +250,13 @@ static void Balance_TaskUpdate(void)
     }
     else
     {
-        if ((target_error <= BALANCE_ONE_CM_PIXELS) &&
-            (target_error >= -BALANCE_ONE_CM_PIXELS))
+        if ((target_error <=
+             BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS) &&
+            (target_error >=
+             -BALANCE_FINAL_ARRIVAL_TOLERANCE_PIXELS))
         {
-            if (g_balance_arrival_frames < BALANCE_ARRIVAL_FRAMES)
+            if (g_balance_arrival_frames <
+                BALANCE_FINAL_ARRIVAL_FRAMES)
             {
                 g_balance_arrival_frames++;
             }
@@ -227,7 +266,8 @@ static void Balance_TaskUpdate(void)
             g_balance_arrival_frames = 0U;
         }
 
-        if (g_balance_arrival_frames >= BALANCE_ARRIVAL_FRAMES)
+        if (g_balance_arrival_frames >=
+            BALANCE_FINAL_ARRIVAL_FRAMES)
         {
             g_balance_stage = 5U;
             g_timer_running = false;
@@ -261,6 +301,7 @@ int main(void)
     LineFollow_Init();
     K230_Link_Init();
     StepControl_Init();
+    g_mpu6050_ready = (MPU6050_Init() != 0U);
     g_initial_limit_ready = false;
     g_calibration_query_ticks = 0U;
     g_calibration_position_sequence = 0U;
@@ -282,6 +323,8 @@ int main(void)
             __disable_irq();
             g_task_10ms_pending = 0U;
             __enable_irq();
+
+            g_sys_tick_10ms++;
 
             Key_Update10ms();
             Encoder_Update10ms();
@@ -416,7 +459,24 @@ static void State_Update(void)
             g_ab_feedforward_tenths = 0;
             Encoder_Clear();
             LineFollow_ResetSoft();
-            LineFollow_SetTargetBasePWM(AB_CRUISE_PWM);
+            g_abcda_finish_creep_active = false;
+            g_abcda_finish_creep_done = false;
+            g_abcda_finish_creep_start_count = 0;
+            if (g_current_state == CAR_STATE_AB_BALANCE)
+            {
+                LineFollow_SetBasePWMSlewX2(
+                    AB_ACCEL_SLEW_X2, AB_DECEL_SLEW_X2);
+            }
+            else
+            {
+                LineFollow_SetBasePWMSlew(
+                    ABCDA_ACCEL_SLEW, ABCDA_DECEL_SLEW);
+            }
+            LineFollow_SetTargetBasePWM(ABCDA_STRAIGHT_PWM);
+            if (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)
+            {
+                g_abcda_curve_active = false;
+            }
             Motor_Enable(true);
             if (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)
             {
@@ -536,6 +596,7 @@ static void State_Enter(enum CAR_STATE state)
             g_circle_finish_requested = false;
             g_timer_10ms_ticks = 0U;
             g_timer_running = true;
+            LineFollow_SetBasePWMSlew(10, 10);
             LineFollow_Reset();
             Motor_Enable(true);
             break;
@@ -568,6 +629,10 @@ static void State_Enter(enum CAR_STATE state)
             g_ab_filtered_pwm_accel = 0;
             g_ab_filtered_encoder_accel = 0;
             g_ab_feedforward_tenths = 0;
+            g_abcda_curve_active = false;
+            g_abcda_finish_creep_active = false;
+            g_abcda_finish_creep_done = false;
+            g_abcda_finish_creep_start_count = 0;
             g_timer_running = false;
             Motor_Coast();
             LineFollow_ResetSoft();
@@ -730,12 +795,15 @@ static void State_Operation(void)
             int32_t encoder_accel;
             int32_t pwm_feedforward_gain;
             int32_t feedforward_tenths;
+            int32_t gyro_z_x10;
+            int32_t gyro_feedforward_tenths;
             int32_t feedforward_delta;
             int16_t target_pwm;
             LineFollow_Status line_status;
             bool stop_line_detected;
             uint8_t right_black_count;
             uint8_t right_bits;
+            int16_t absolute_line_error;
 
             average_pwm =
                 ((int32_t)motor.left_pwm + motor.right_pwm) / 2L;
@@ -765,13 +833,63 @@ static void State_Operation(void)
                 (pwm_feedforward_gain * g_ab_filtered_pwm_accel +
                  AB_ENCODER_ACCEL_FF_NUM *
                      g_ab_filtered_encoder_accel);
-            if (feedforward_tenths > AB_FEEDFORWARD_LIMIT_TENTHS)
+            gyro_feedforward_tenths = 0;
+            if ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) &&
+                g_abcda_curve_active && g_mpu6050_ready &&
+                !g_abcda_finish_creep_active)
             {
-                feedforward_tenths = AB_FEEDFORWARD_LIMIT_TENTHS;
+                MPU6050_Read_Gyro();
+                gyro_z_x10 = (int32_t)(gyro_z * 10.0f);
+                g_abcda_filtered_gyro_z_x10 = (int16_t)(
+                    (g_abcda_filtered_gyro_z_x10 + gyro_z_x10) / 2L);
+                if ((g_abcda_filtered_gyro_z_x10 >
+                     ABCDA_GYRO_FF_DEADZONE_X10) ||
+                    (g_abcda_filtered_gyro_z_x10 <
+                     -ABCDA_GYRO_FF_DEADZONE_X10))
+                {
+                    gyro_feedforward_tenths = ABCDA_GYRO_FF_SIGN *
+                        ABCDA_GYRO_FF_GAIN_NUM *
+                        g_abcda_filtered_gyro_z_x10 /
+                        ABCDA_GYRO_FF_GAIN_DEN;
+                    if (gyro_feedforward_tenths >
+                        ABCDA_GYRO_FF_LIMIT_TENTHS)
+                    {
+                        gyro_feedforward_tenths =
+                            ABCDA_GYRO_FF_LIMIT_TENTHS;
+                    }
+                    else if (gyro_feedforward_tenths <
+                             -ABCDA_GYRO_FF_LIMIT_TENTHS)
+                    {
+                        gyro_feedforward_tenths =
+                            -ABCDA_GYRO_FF_LIMIT_TENTHS;
+                    }
+                }
             }
-            else if (feedforward_tenths < -AB_FEEDFORWARD_LIMIT_TENTHS)
+            else
             {
-                feedforward_tenths = -AB_FEEDFORWARD_LIMIT_TENTHS;
+                g_abcda_filtered_gyro_z_x10 = 0;
+            }
+            feedforward_tenths += gyro_feedforward_tenths;
+            if (feedforward_tenths >
+                ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                 ABCDA_FEEDFORWARD_LIMIT_TENTHS :
+                 AB_FEEDFORWARD_LIMIT_TENTHS))
+            {
+                feedforward_tenths =
+                    (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                    ABCDA_FEEDFORWARD_LIMIT_TENTHS :
+                    AB_FEEDFORWARD_LIMIT_TENTHS;
+            }
+            else if (feedforward_tenths <
+                     -((g_current_state ==
+                        CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                       ABCDA_FEEDFORWARD_LIMIT_TENTHS :
+                       AB_FEEDFORWARD_LIMIT_TENTHS))
+            {
+                feedforward_tenths =
+                    (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                    -ABCDA_FEEDFORWARD_LIMIT_TENTHS :
+                    -AB_FEEDFORWARD_LIMIT_TENTHS;
             }
             if (!g_ab_started || g_ab_stopped)
             {
@@ -779,13 +897,26 @@ static void State_Operation(void)
             }
             feedforward_delta =
                 feedforward_tenths - g_ab_feedforward_tenths;
-            if (feedforward_delta > AB_FEEDFORWARD_SLEW_TENTHS)
+            if (feedforward_delta >
+                ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                 ABCDA_FEEDFORWARD_SLEW_TENTHS :
+                 AB_FEEDFORWARD_SLEW_TENTHS))
             {
-                feedforward_delta = AB_FEEDFORWARD_SLEW_TENTHS;
+                feedforward_delta =
+                    (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                    ABCDA_FEEDFORWARD_SLEW_TENTHS :
+                    AB_FEEDFORWARD_SLEW_TENTHS;
             }
-            else if (feedforward_delta < -AB_FEEDFORWARD_SLEW_TENTHS)
+            else if (feedforward_delta <
+                     -((g_current_state ==
+                        CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                       ABCDA_FEEDFORWARD_SLEW_TENTHS :
+                       AB_FEEDFORWARD_SLEW_TENTHS))
             {
-                feedforward_delta = -AB_FEEDFORWARD_SLEW_TENTHS;
+                feedforward_delta =
+                    (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) ?
+                    -ABCDA_FEEDFORWARD_SLEW_TENTHS :
+                    -AB_FEEDFORWARD_SLEW_TENTHS;
             }
             g_ab_feedforward_tenths = (int16_t)(
                 g_ab_feedforward_tenths + feedforward_delta);
@@ -807,11 +938,112 @@ static void State_Operation(void)
 
 #if AB_CONTINUOUS_TRACKING
             /* Keep following the line until the user changes mode. */
-            LineFollow_Update10ms();
             if ((g_current_state == CAR_STATE_AB_BALANCE) &&
-                (travelled >= AB_TARGET_ENCODER_COUNTS))
+                g_ab_stopping)
             {
-                g_timer_running = false;
+                target_pwm = (average_pwm > AB_STOP_PWM_STEP) ?
+                    (int16_t)(average_pwm - AB_STOP_PWM_STEP) : 0;
+                Motor_SetPWM(target_pwm, target_pwm);
+                if ((encoder.left_rpm <= AB_STOP_RPM) &&
+                    (encoder.left_rpm >= -AB_STOP_RPM) &&
+                    (encoder.right_rpm <= AB_STOP_RPM) &&
+                    (encoder.right_rpm >= -AB_STOP_RPM))
+                {
+                    Motor_Coast();
+                    g_timer_running = false;
+                    g_ab_stopped = true;
+                }
+                break;
+            }
+            if ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) &&
+                g_abcda_finish_creep_done)
+            {
+                target_pwm = (average_pwm > ABCDA_STOP_PWM_STEP) ?
+                    (int16_t)(average_pwm - ABCDA_STOP_PWM_STEP) : 0;
+                Motor_SetPWM(target_pwm, target_pwm);
+                if ((encoder.left_rpm <= AB_STOP_RPM) &&
+                    (encoder.left_rpm >= -AB_STOP_RPM) &&
+                    (encoder.right_rpm <= AB_STOP_RPM) &&
+                    (encoder.right_rpm >= -AB_STOP_RPM))
+                {
+                    Motor_Coast();
+                    g_timer_running = false;
+                    g_ab_stopped = true;
+                }
+                break;
+            }
+            if ((g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER) &&
+                g_abcda_finish_creep_active)
+            {
+                LineFollow_SetTargetBasePWM(
+                    ABCDA_FINISH_CREEP_PWM);
+            }
+            if (g_current_state == CAR_STATE_ABCDA_BALANCE_CENTER)
+            {
+                line_status = LineFollow_GetStatus();
+                absolute_line_error = (line_status.error < 0) ?
+                    (int16_t)-line_status.error : line_status.error;
+                if (g_abcda_finish_creep_active)
+                {
+                    LineFollow_SetTargetBasePWM(
+                        ABCDA_FINISH_CREEP_PWM);
+                }
+                else if (!g_abcda_curve_active &&
+                         (absolute_line_error >=
+                          ABCDA_CURVE_ENTER_ERROR))
+                {
+                    g_abcda_curve_active = true;
+                }
+                else if (g_abcda_curve_active &&
+                         (absolute_line_error <=
+                          ABCDA_CURVE_EXIT_ERROR) &&
+                         !line_status.line_lost)
+                {
+                    g_abcda_curve_active = false;
+                }
+                if (!g_abcda_finish_creep_active)
+                {
+                    LineFollow_SetTargetBasePWM(
+                        g_abcda_curve_active ?
+                        ABCDA_CURVE_PWM : ABCDA_STRAIGHT_PWM);
+                }
+            }
+            else if (!g_ab_stopping &&
+                     (travelled >= AB_DECEL_START_COUNTS))
+            {
+                int32_t decel_distance =
+                    AB_TARGET_ENCODER_COUNTS -
+                    AB_DECEL_START_COUNTS;
+                int32_t decel_remaining =
+                    AB_TARGET_ENCODER_COUNTS - travelled;
+                if (decel_remaining < 0L) decel_remaining = 0L;
+                target_pwm = (int16_t)(
+                    AB_APPROACH_PWM +
+                    ((int32_t)(ABCDA_STRAIGHT_PWM -
+                               AB_APPROACH_PWM) *
+                     decel_remaining) / decel_distance);
+                LineFollow_SetTargetBasePWM(target_pwm);
+            }
+            LineFollow_Update10ms();
+            if ((g_current_state ==
+                 CAR_STATE_ABCDA_BALANCE_CENTER) &&
+                g_abcda_finish_creep_active &&
+                ((travelled - g_abcda_finish_creep_start_count) >=
+                 ABCDA_FINISH_CREEP_COUNTS))
+            {
+                g_abcda_finish_creep_active = false;
+                g_abcda_finish_creep_done = true;
+                g_ab_stop_stable_ticks = 0U;
+                break;
+            }
+            if (g_current_state == CAR_STATE_AB_BALANCE)
+            {
+                if (!g_ab_stopping &&
+                    (travelled >= AB_TARGET_ENCODER_COUNTS))
+                {
+                    g_ab_stopping = true;
+                    g_ab_stop_stable_ticks = 0U;
+                }
             }
             else if (g_current_state ==
                      CAR_STATE_ABCDA_BALANCE_CENTER)
@@ -845,12 +1077,20 @@ static void State_Operation(void)
                         g_circle_depart_ticks = 0U;
                     }
                 }
-                else if (stop_line_detected)
+                else if (stop_line_detected &&
+                         !g_abcda_finish_creep_active &&
+                         !g_abcda_finish_creep_done)
                 {
                     if (g_circle_finish_ticks < CIRCLE_FINISH_TICKS)
                         g_circle_finish_ticks++;
                     if (g_circle_finish_ticks >= CIRCLE_FINISH_TICKS)
-                        g_timer_running = false;
+                    {
+                        g_abcda_finish_creep_active = true;
+                        g_abcda_finish_creep_start_count = travelled;
+                        g_ab_stop_stable_ticks = 0U;
+                        LineFollow_SetTargetBasePWM(
+                            ABCDA_FINISH_CREEP_PWM);
+                    }
                 }
                 else
                 {

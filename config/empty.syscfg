@@ -16,6 +16,7 @@ const GPIO2         = GPIO.addInstance();
 const GPIO3         = GPIO.addInstance();
 const GPIO4         = GPIO.addInstance();
 const GPIO5         = GPIO.addInstance();
+const GPIO6         = GPIO.addInstance();
 const I2C           = scripting.addModule("/ti/driverlib/I2C", {}, false);
 const I2C1          = I2C.addInstance();
 const MCAN          = scripting.addModule("/ti/driverlib/MCAN", {}, false);
@@ -124,6 +125,18 @@ GPIO5.associatedPins[2].pin.$assign = "PB24";
 GPIO5.associatedPins[3].$name       = "ENCODER_A2";
 GPIO5.associatedPins[3].direction   = "INPUT";
 GPIO5.associatedPins[3].pin.$assign = "PB27";
+
+/* MPU6050 software-I2C bus: PA10=SDA, PA11=SCL. */
+GPIO6.$name                          = "MPU6050_I2C";
+GPIO6.associatedPins.create(2);
+GPIO6.associatedPins[0].$name        = "SDA";
+GPIO6.associatedPins[0].assignedPort = "PORTA";
+GPIO6.associatedPins[0].assignedPin  = "10";
+GPIO6.associatedPins[0].pin.$assign  = "PA10";
+GPIO6.associatedPins[1].$name        = "SCL";
+GPIO6.associatedPins[1].assignedPort = "PORTA";
+GPIO6.associatedPins[1].assignedPin  = "11";
+GPIO6.associatedPins[1].pin.$assign  = "PA11";
 
 /*
  * Expansion-board OLED wiring is unchanged:

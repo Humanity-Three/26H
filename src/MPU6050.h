@@ -31,6 +31,7 @@
 extern float Yaw;
 extern float Pitch;
 extern float Roll;
+extern float gyro_z;
 
 // 函数声明
 uint8_t MPU6050_Init(void);

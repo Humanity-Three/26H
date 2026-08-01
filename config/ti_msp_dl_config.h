@@ -211,6 +211,15 @@ extern "C" {
 /* Defines for ENCODER_A2: GPIOB.27 with pinCMx 58 on package pin 29 */
 #define ENCODER_READ_ENCODER_A2_PIN                             (DL_GPIO_PIN_27)
 #define ENCODER_READ_ENCODER_A2_IOMUX                            (IOMUX_PINCM58)
+/* Port definition for Pin Group MPU6050_I2C */
+#define MPU6050_I2C_PORT                                                 (GPIOA)
+
+/* Defines for SDA: GPIOA.10 with pinCMx 21 on package pin 56 */
+#define MPU6050_I2C_SDA_PIN                                     (DL_GPIO_PIN_10)
+#define MPU6050_I2C_SDA_IOMUX                                    (IOMUX_PINCM21)
+/* Defines for SCL: GPIOA.11 with pinCMx 22 on package pin 57 */
+#define MPU6050_I2C_SCL_PIN                                     (DL_GPIO_PIN_11)
+#define MPU6050_I2C_SCL_IOMUX                                    (IOMUX_PINCM22)
 
 
 /* Defines for MCAN0 */

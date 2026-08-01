@@ -16,6 +16,9 @@ static int16_t g_line_last_error;
 static int32_t g_line_integral;
 static int16_t g_line_current_base_pwm;
 static int16_t g_line_target_base_pwm;
+static int16_t g_line_acceleration_slew = 10;
+static int16_t g_line_deceleration_slew = 10;
+static bool g_line_acceleration_half_step;
 
 static int16_t LineFollow_Clamp(int32_t value, int16_t limit)
 {
@@ -71,6 +74,27 @@ void LineFollow_SetTargetBasePWM(int16_t base_pwm)
         base_pwm = MOTOR_PWM_MAX;
     }
     g_line_target_base_pwm = base_pwm;
+}
+
+void LineFollow_SetBasePWMSlew(
+    int16_t acceleration_slew, int16_t deceleration_slew)
+{
+    if (acceleration_slew < 1) acceleration_slew = 1;
+    if (deceleration_slew < 1) deceleration_slew = 1;
+    g_line_acceleration_slew = acceleration_slew;
+    g_line_deceleration_slew = deceleration_slew;
+    g_line_acceleration_half_step = false;
+}
+
+void LineFollow_SetBasePWMSlewX2(
+    int16_t acceleration_slew_x2, int16_t deceleration_slew_x2)
+{
+    if (acceleration_slew_x2 < 2) acceleration_slew_x2 = 2;
+    if (deceleration_slew_x2 < 2) deceleration_slew_x2 = 2;
+    g_line_acceleration_slew = (int16_t)(acceleration_slew_x2 / 2);
+    g_line_deceleration_slew = (int16_t)(deceleration_slew_x2 / 2);
+    g_line_acceleration_half_step =
+        ((acceleration_slew_x2 & 1) != 0);
 }
 
 void LineFollow_SetConfig(const LineFollow_Config *config)
@@ -148,8 +172,16 @@ void LineFollow_Update10ms(void)
     /* 从可靠起转值平滑升至 25E 已验证的巡航值。 */
     if (g_line_current_base_pwm < g_line_target_base_pwm)
     {
+        static bool add_half_step;
+        int16_t acceleration_step = g_line_acceleration_slew;
+        if (g_line_acceleration_half_step)
+        {
+            add_half_step = !add_half_step;
+            if (add_half_step) acceleration_step++;
+        }
         g_line_current_base_pwm =
-            (int16_t)(g_line_current_base_pwm + 10);
+            (int16_t)(g_line_current_base_pwm +
+                      acceleration_step);
         if (g_line_current_base_pwm > g_line_target_base_pwm)
         {
             g_line_current_base_pwm = g_line_target_base_pwm;
@@ -158,7 +190,8 @@ void LineFollow_Update10ms(void)
     else if (g_line_current_base_pwm > g_line_target_base_pwm)
     {
         g_line_current_base_pwm =
-            (int16_t)(g_line_current_base_pwm - 10);
+            (int16_t)(g_line_current_base_pwm -
+                      g_line_deceleration_slew);
         if (g_line_current_base_pwm < g_line_target_base_pwm)
         {
             g_line_current_base_pwm = g_line_target_base_pwm;

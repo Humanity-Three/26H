@@ -17,7 +17,11 @@
 #define STEP_CONTROL_POSITION_EPSILON (2)
 #define STEP_CONTROL_ERROR_JUMP_MAX (160)
 #define STEP_CONTROL_STICTION_DERIVATIVE_MAX (2)
-#define STEP_CONTROL_STICTION_OUTPUT_TENTHS (26)
+#define STEP_CONTROL_STICTION_RELEASE_DERIVATIVE (4)
+#define STEP_CONTROL_STICTION_MIN_TENTHS (14)
+#define STEP_CONTROL_STICTION_MAX_TENTHS (26)
+#define STEP_CONTROL_STICTION_RAMP_TENTHS (2)
+#define STEP_CONTROL_STICTION_RELEASE_TENTHS (4)
 #define STEP_POSITION_FULL_OUTPUT_TENTHS (300L)
 
 /*
@@ -44,7 +48,7 @@
 #define STEP_CASCADE_POSITION_INTEGRAL_ZONE (32)
 #define STEP_CASCADE_TARGET_VELOCITY_X10_MAX (80)
 #define STEP_CASCADE_SPEED_KP_NUM   (100L)
-#define STEP_CASCADE_SPEED_KP_AWAY_NUM (130L)
+#define STEP_CASCADE_SPEED_KP_AWAY_NUM (180L)
 #define STEP_CASCADE_SPEED_KI_NUM   (0L)
 #define STEP_CASCADE_SPEED_KD_NUM   (90L)
 #define STEP_CASCADE_SPEED_GAIN_DEN (100L)
@@ -72,6 +76,9 @@ static int16_t g_output_tenths;
 static int16_t g_feedforward_tenths;
 static int32_t g_speed_integral_x10;
 static int16_t g_previous_speed_error_x10;
+static int16_t g_stiction_tenths;
+static int8_t g_stiction_direction;
+static bool g_stiction_active;
 static uint8_t g_lost_target_ticks;
 static uint32_t g_last_frame_count;
 static int32_t g_last_target_position;
@@ -84,6 +91,78 @@ static bool g_loss_stop_sent;
 static bool g_open_loop_active;
 static bool g_velocity_profile_enabled;
 static bool g_active;
+
+static int32_t StepControl_ApplyStiction(
+    int32_t output, int16_t error, int16_t velocity_pixels_per_frame)
+{
+    int8_t requested_direction = 0;
+    int16_t absolute_velocity = velocity_pixels_per_frame;
+
+    if (absolute_velocity < 0)
+        absolute_velocity = (int16_t)-absolute_velocity;
+
+    if (error != 0)
+    {
+        if (output > 0)
+            requested_direction = 1;
+        else if (output < 0)
+            requested_direction = -1;
+        else
+            requested_direction = (error > 0) ? 1 : -1;
+    }
+
+    if ((requested_direction != 0) &&
+        (absolute_velocity <= STEP_CONTROL_STICTION_DERIVATIVE_MAX))
+    {
+        if ((g_stiction_direction != 0) &&
+            (requested_direction != g_stiction_direction) &&
+            (g_stiction_tenths > 0))
+        {
+            /* Release the previous direction before allowing reversal. */
+            g_stiction_active = false;
+        }
+        else
+        {
+            g_stiction_direction = requested_direction;
+            g_stiction_active = true;
+            if (g_stiction_tenths < STEP_CONTROL_STICTION_MIN_TENTHS)
+            {
+                g_stiction_tenths = STEP_CONTROL_STICTION_MIN_TENTHS;
+            }
+            else if (g_stiction_tenths <
+                     STEP_CONTROL_STICTION_MAX_TENTHS)
+            {
+                g_stiction_tenths +=
+                    STEP_CONTROL_STICTION_RAMP_TENTHS;
+                if (g_stiction_tenths >
+                    STEP_CONTROL_STICTION_MAX_TENTHS)
+                {
+                    g_stiction_tenths =
+                        STEP_CONTROL_STICTION_MAX_TENTHS;
+                }
+            }
+        }
+    }
+    else if ((error == 0) ||
+             (absolute_velocity >=
+              STEP_CONTROL_STICTION_RELEASE_DERIVATIVE))
+    {
+        g_stiction_active = false;
+    }
+
+    if (!g_stiction_active && (g_stiction_tenths > 0))
+    {
+        g_stiction_tenths -= STEP_CONTROL_STICTION_RELEASE_TENTHS;
+        if (g_stiction_tenths <= 0)
+        {
+            g_stiction_tenths = 0;
+            g_stiction_direction = 0;
+        }
+    }
+
+    return output +
+        (int32_t)g_stiction_direction * g_stiction_tenths;
+}
 
 static int32_t StepControl_CalculateCascade(
     int16_t error, int16_t velocity_pixels_per_frame)
@@ -146,7 +225,6 @@ static int32_t StepControl_CalculateCascade(
     {
         speed_kp_num = STEP_CASCADE_SPEED_KP_AWAY_NUM;
     }
-
     g_speed_integral_x10 += speed_error_x10;
     if (g_speed_integral_x10 > STEP_CASCADE_SPEED_INTEGRAL_MAX)
         g_speed_integral_x10 = STEP_CASCADE_SPEED_INTEGRAL_MAX;
@@ -154,7 +232,7 @@ static int32_t StepControl_CalculateCascade(
         g_speed_integral_x10 = -STEP_CASCADE_SPEED_INTEGRAL_MAX;
 
     output_tenths =
-        (speed_kp_num * speed_error_x10 +
+         (speed_kp_num * speed_error_x10 +
          STEP_CASCADE_SPEED_KI_NUM * g_speed_integral_x10 +
          STEP_CASCADE_SPEED_KD_NUM * speed_derivative_x10) /
         STEP_CASCADE_SPEED_GAIN_DEN;
@@ -258,6 +336,9 @@ void StepControl_Init(void)
     g_filtered_derivative = 0;
     g_speed_integral_x10 = 0;
     g_previous_speed_error_x10 = 0;
+    g_stiction_tenths = 0;
+    g_stiction_direction = 0;
+    g_stiction_active = false;
     g_target_offset_pixels = 0;
     g_output_tenths = 0;
     g_feedforward_tenths = 0;
@@ -303,6 +384,9 @@ void StepControl_SetTargetOffsetPixels(int16_t offset_pixels)
     g_filtered_derivative = 0;
     g_speed_integral_x10 = 0;
     g_previous_speed_error_x10 = 0;
+    g_stiction_tenths = 0;
+    g_stiction_direction = 0;
+    g_stiction_active = false;
     g_output_tenths = 0;
     g_filter_valid = false;
 }
@@ -574,6 +658,7 @@ void StepControl_Update10ms(void)
                     profile_output_limit_tenths =
                         STEP_PROFILE_MAX_LIMIT_TENTHS;
                 }
+
             }
 #if STEP_CONTROL_USE_CASCADE
             output = StepControl_CalculateCascade(error, derivative);
@@ -657,25 +742,8 @@ void StepControl_Update10ms(void)
             output += g_feedforward_tenths;
 #endif
 
-            /*
-             * Overcome static friction only when the ball is nearly stopped
-             * outside the position dead zone. Once motion is detected, the
-             * normal PID output takes over immediately.
-             */
-            if ((derivative <= STEP_CONTROL_STICTION_DERIVATIVE_MAX) &&
-                (derivative >= -STEP_CONTROL_STICTION_DERIVATIVE_MAX))
-            {
-                if ((error > 0) &&
-                    (output < STEP_CONTROL_STICTION_OUTPUT_TENTHS))
-                {
-                    output = STEP_CONTROL_STICTION_OUTPUT_TENTHS;
-                }
-                else if ((error < 0) &&
-                         (output > -STEP_CONTROL_STICTION_OUTPUT_TENTHS))
-                {
-                    output = -STEP_CONTROL_STICTION_OUTPUT_TENTHS;
-                }
-            }
+            output = StepControl_ApplyStiction(
+                output, error, derivative);
             output = StepControl_Clamp(
                 output, profile_output_limit_tenths);
             g_step_status.error = error;
@@ -706,6 +774,9 @@ void StepControl_Update10ms(void)
         g_filtered_derivative = 0;
         g_speed_integral_x10 = 0;
         g_previous_speed_error_x10 = 0;
+        g_stiction_tenths = 0;
+        g_stiction_direction = 0;
+        g_stiction_active = false;
         g_output_tenths = 0;
         g_filter_valid = false;
         g_lost_target_ticks = STEP_CONTROL_LOST_HOLD_TICKS;
